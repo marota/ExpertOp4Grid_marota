@@ -35,12 +35,13 @@ from alphaDeesp.core.graphs import (
 # Structural invariants of the refactor
 # ---------------------------------------------------------------------------
 
-# The 16 public names the refactor commits to exporting, in the same order
+# The public names the refactor commits to exporting, in the same order
 # as ``alphaDeesp/core/graphs/__init__.py::__all__``.
 EXPECTED_PUBLIC_NAMES = frozenset({
     "default_voltage_colors",
     "PowerFlowGraph",
     "OverFlowGraph",
+    "OverflowGraphRenderer",
     "ConstrainedPath",
     "Structured_Overload_Distribution_Graph",
     "from_edges_get_nodes",
@@ -62,6 +63,7 @@ EXPECTED_SYMBOL_SUBMODULE = {
     "default_voltage_colors": "alphaDeesp.core.graphs.constants",
     "PowerFlowGraph": "alphaDeesp.core.graphs.power_flow_graph",
     "OverFlowGraph": "alphaDeesp.core.graphs.overflow_graph",
+    "OverflowGraphRenderer": "alphaDeesp.core.graphs.overflow_renderer",
     "ConstrainedPath": "alphaDeesp.core.graphs.constrained_path",
     "Structured_Overload_Distribution_Graph":
         "alphaDeesp.core.graphs.structured_overload_graph",
@@ -87,6 +89,7 @@ EXPECTED_SUBMODULES = frozenset({
     "constrained_path",
     "structured_overload_graph",
     "overflow_graph",
+    "overflow_renderer",
 })
 
 

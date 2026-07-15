@@ -14,7 +14,6 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import networkx as nx
 
 from alphaDeesp.core.graphs.graph_utils import (
-    all_simple_edge_paths_multi,
     find_multidigraph_edges_by_name,
     nodepath_to_edgepath,
 )
@@ -457,7 +456,14 @@ class NullFlowGraphMixin:
             try:
                 sssp_paths_cache[source_node] = nx.single_source_dijkstra_path(
                     g_c, source_node, weight=incentivized_weight)
-            except Exception:
+            except (nx.NetworkXException, ValueError) as exc:
+                # Expected failure modes: source absent from the component
+                # (NetworkXException) or a negative capacity reaching the
+                # incentivised weight fn (ValueError). Anything else is a real
+                # bug and is left to propagate rather than silently masked.
+                logger.warning(
+                    "single_source_dijkstra_path failed at node %s: %s; "
+                    "treating as no reachable paths.", source_node, exc)
                 sssp_paths_cache[source_node] = {}
         return sssp_paths_cache
 

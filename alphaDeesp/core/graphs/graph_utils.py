@@ -6,7 +6,7 @@ trivial to unit-test in isolation.
 """
 
 import logging
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Union
 
 import networkx as nx
 
@@ -29,11 +29,17 @@ def from_edges_get_nodes(edges: Iterable[Any], amont_or_aval: str, constrained_e
     else:
         raise ValueError("Error in function from_edges_get_nodes")
 
-def delete_color_edges(_g: nx.MultiDiGraph, edge_color: str) -> nx.MultiDiGraph:
+def delete_color_edges(_g: nx.MultiDiGraph, edge_color: Union[str, Iterable[str]]) -> nx.MultiDiGraph:
     """
-    Returns a copy of a graph without edges of a given color. Gray for instance, with values below a threshold of significance
+    Returns a copy of a graph without edges of the given colour(s).
 
-    From a given node, get blue edges (with negative overflow redispatch) that are above this node
+    A single colour (``"gray"``) or an iterable of colours
+    (``("gray", "dimgray")``) may be passed. Passing several colours at once
+    removes them in a *single* graph copy, which is markedly cheaper than
+    chaining calls (each chained call would copy the whole graph again).
+    The result is identical to removing the colours one after another: an
+    edge survives iff its colour is not in the requested set, and isolated
+    nodes are pruned once at the end.
 
     Parameters
     ----------
@@ -41,29 +47,27 @@ def delete_color_edges(_g: nx.MultiDiGraph, edge_color: str) -> nx.MultiDiGraph:
     _g: :class:`nx:MultiDiGraph`
         an overflow redispatch networkx graph
 
-    edge_color: ``str``
-        color of edges to delete from graoh
+    edge_color: ``str`` or iterable of ``str``
+        colour(s) of edges to delete from the graph
 
     Returns
     ----------
 
     res: :class:`nx:MultiDiGraph`
-        the graph without edges for the targeted color
+        the graph without edges for the targeted colour(s)
 
     """
+    colors_to_delete = {edge_color} if isinstance(edge_color, str) else set(edge_color)
     g = _g.copy()
 
-    TargetColor_edges = []
-    i = 1
-    for u, v,idx, color in g.edges(data="color",keys=True):
-        if color == edge_color:
-            TargetColor_edges.append((i, (u, v,idx)))
-        i += 1
+    target_edges = [
+        (u, v, idx)
+        for u, v, idx, color in g.edges(keys=True, data="color")
+        if color in colors_to_delete
+    ]
 
-    # delete from graph gray edges
-    # this extracts the (u,v) from pos_edges
-    if TargetColor_edges:
-        g.remove_edges_from(list(zip(*TargetColor_edges))[1])
+    if target_edges:
+        g.remove_edges_from(target_edges)
         g.remove_nodes_from(list(nx.isolates(g)))
     return g
 

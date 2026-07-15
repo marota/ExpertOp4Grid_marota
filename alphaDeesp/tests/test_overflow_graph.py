@@ -944,3 +944,55 @@ class TestTagConstrainedPathSkipsCoralEdges:
         ofg.tag_constrained_path(lines_constrained_path=["L1", "L2"])
         for _, _, _, data in ofg.g.edges(keys=True, data=True):
             assert data.get("on_constrained_path") is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# rename_nodes: relabels the graph AND both endpoint columns of the df.
+# Regression for the copy-paste bug where ``idx_ex`` was rebuilt from
+# ``idx_or`` (so the extremity column mirrored the origin column).
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _rename_df():
+    return pd.DataFrame({
+        "idx_or": [0, 1],
+        "idx_ex": [1, 2],
+        "delta_flows": [10.0, -5.0],
+        "gray_edges": [False, False],
+        "line_name": ["L1", "L2"],
+    })
+
+
+class TestRenameNodes:
+
+    def test_rename_updates_graph_and_both_df_columns(self):
+        ofg = OverFlowGraph(_basic_topo(3), [], _rename_df())
+        ofg.rename_nodes({0: "A", 1: "B", 2: "C"})
+
+        assert set(ofg.g.nodes) == {"A", "B", "C"}
+        # idx_or maps 0,1 -> A,B; idx_ex maps 1,2 -> B,C (NOT A,B).
+        assert list(ofg.df["idx_or"]) == ["A", "B"]
+        assert list(ofg.df["idx_ex"]) == ["B", "C"]
+
+
+class TestDoesNotMutateCallerDataFrame:
+    """OverFlowGraph must operate on a copy of the caller's DataFrame."""
+
+    def test_line_name_column_not_added_to_caller_df(self):
+        df = pd.DataFrame({
+            "idx_or": [0, 1], "idx_ex": [1, 2],
+            "delta_flows": [10.0, -5.0], "gray_edges": [False, False],
+        })
+        cols_before = list(df.columns)
+        ofg = OverFlowGraph(_basic_topo(3), [], df)
+        assert "line_name" not in df.columns
+        assert list(df.columns) == cols_before
+        # the internal copy still carries the generated column
+        assert "line_name" in ofg.df.columns
+
+    def test_rename_nodes_does_not_touch_caller_df(self):
+        df = _rename_df()
+        ofg = OverFlowGraph(_basic_topo(3), [], df)
+        ofg.rename_nodes({0: "A", 1: "B", 2: "C"})
+        assert list(df["idx_or"]) == [0, 1]
+        assert list(df["idx_ex"]) == [1, 2]

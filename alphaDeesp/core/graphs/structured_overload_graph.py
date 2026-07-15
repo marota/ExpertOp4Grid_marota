@@ -18,12 +18,25 @@ from alphaDeesp.core.graphs.null_flow import (
 
 logger = logging.getLogger(__name__)
 
+# Maximum number of nodes in a loop path enumerated by :meth:`find_loops`.
+# Enumerating *all* simple paths between every pair of candidate hubs is
+# combinatorial; without a bound it can hang on large grids (the author's
+# original comment already flagged this). ``10`` matches that documented
+# intent and is generous for the substation-scale loops the expert system
+# reasons about; callers can widen or disable it (``None``) per grid.
+DEFAULT_LOOP_PATH_CUTOFF = 10
+
 
 class Structured_Overload_Distribution_Graph:
     """
     Staring from a raw overload distribution graph with color edges, this class identifies the underlying path structure in terms of constrained path, loop paths and hub nodes
     """
-    def __init__(self, g: nx.MultiDiGraph, possible_hubs: Optional[List[Any]] = None) -> None:
+    def __init__(
+        self,
+        g: nx.MultiDiGraph,
+        possible_hubs: Optional[List[Any]] = None,
+        loop_path_cutoff: Optional[int] = DEFAULT_LOOP_PATH_CUTOFF,
+    ) -> None:
         """
         Parameters
         ----------
@@ -31,16 +44,29 @@ class Structured_Overload_Distribution_Graph:
         g: :class:`nx:MultiDiGraph`
             a raw graph from OverflowGraph
 
+        possible_hubs: list, optional
+            a pre-computed subset of hub candidates (e.g. when consolidating a
+            previously built overflow graph)
+
+        loop_path_cutoff: int, optional
+            maximum number of nodes in a loop path enumerated by
+            :meth:`find_loops`. ``None`` disables the bound (legacy behaviour,
+            unsafe on large grids). Defaults to :data:`DEFAULT_LOOP_PATH_CUTOFF`.
+
         """
         self.g_init=g
+        self.loop_path_cutoff = loop_path_cutoff
+        # Derive each colour-filtered view in a *single* copy (see
+        # ``delete_color_edges``): removing the union of colours at once is
+        # equivalent to chaining the removals but avoids the intermediate
+        # full-graph copies the chained form used to allocate.
         self.g_without_pos_edges = delete_color_edges(self.g_init, "coral") #graph without loop path that have positive/red-coloured weight edges
-        self.g_only_blue_components = delete_color_edges(self.g_without_pos_edges, "gray")
-        self.g_only_blue_components = delete_color_edges(self.g_only_blue_components, "dimgray")#also delete those edges of non reconnectable lines that we would want to visualize but is not an operational path in the structured path
+        #also delete dimgray edges of non reconnectable lines that we would want to visualize but is not an operational path in the structured path
+        self.g_only_blue_components = delete_color_edges(self.g_init, ("coral", "gray", "dimgray"))
 
         self.g_without_constrained_edge = delete_color_edges(self.g_init, "black")
-        self.g_without_gray_and_c_edge = delete_color_edges(self.g_without_constrained_edge, "gray")
-        self.g_without_gray_and_c_edge = delete_color_edges(self.g_without_gray_and_c_edge, "dimgray")
-        self.g_only_red_components = delete_color_edges(self.g_without_gray_and_c_edge, "blue")#graph with only loop path that have positive/red-coloured weight edges
+        self.g_without_gray_and_c_edge = delete_color_edges(self.g_init, ("black", "gray", "dimgray"))
+        self.g_only_red_components = delete_color_edges(self.g_init, ("black", "gray", "dimgray", "blue"))#graph with only loop path that have positive/red-coloured weight edges
 
         self.constrained_path= self.find_constrained_path() #constrained path that contains the constrained edges and their connected component of blue edges
         self.type=""#
@@ -192,9 +218,12 @@ class Structured_Overload_Distribution_Graph:
                     s_idx = node_map[src_name]
                     t_idx = node_map[tgt_name]
 
-                    # Rustworkx: Find all simple paths (FAST)
-                    # cutoff=10 is crucial to prevent hanging on large grids
-                    paths_indices = rx.all_simple_paths(rx_graph, s_idx, t_idx, min_depth=1)#, cutoff=10)
+                    # Rustworkx: Find all simple paths (FAST).
+                    # ``cutoff`` (max nodes per path) is crucial to prevent
+                    # hanging on large grids; see ``loop_path_cutoff``. rustworkx
+                    # treats ``cutoff=None`` as "no bound".
+                    paths_indices = rx.all_simple_paths(
+                        rx_graph, s_idx, t_idx, min_depth=1, cutoff=self.loop_path_cutoff)
 
                     # Convert Indices -> Names
                     # We extend the main list directly

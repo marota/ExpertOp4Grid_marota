@@ -13,6 +13,7 @@ from :mod:`alphaDeesp.core.graphs` (or one of its sub-modules).
 from alphaDeesp.core.graphs import (  # noqa: F401
     ConstrainedPath,
     OverFlowGraph,
+    OverflowGraphRenderer,
     PowerFlowGraph,
     Structured_Overload_Distribution_Graph,
     add_double_edges_null_redispatch,
@@ -33,6 +34,7 @@ __all__ = [
     "default_voltage_colors",
     "PowerFlowGraph",
     "OverFlowGraph",
+    "OverflowGraphRenderer",
     "ConstrainedPath",
     "Structured_Overload_Distribution_Graph",
     "from_edges_get_nodes",
