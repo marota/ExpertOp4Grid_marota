@@ -18,13 +18,15 @@ from alphaDeesp.core.graphs.null_flow import (
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of nodes in a loop path enumerated by :meth:`find_loops`.
-# Enumerating *all* simple paths between every pair of candidate hubs is
-# combinatorial; without a bound it can hang on large grids (the author's
-# original comment already flagged this). ``10`` matches that documented
-# intent and is generous for the substation-scale loops the expert system
-# reasons about; callers can widen or disable it (``None``) per grid.
-DEFAULT_LOOP_PATH_CUTOFF = 10
+# Optional bound on the number of *nodes* in a loop path enumerated by
+# :meth:`find_loops` (rustworkx ``cutoff`` counts nodes). Enumerating all
+# simple paths between every pair of candidate hubs is combinatorial and can
+# hang on very large grids. The bound is **OFF by default** (``None`` ==
+# unbounded == the original behaviour): a too-small cutoff silently drops
+# legitimate long loops — real RTE zone grids have loop paths well beyond 10
+# nodes, and an emptied ``find_loops`` then breaks downstream consumers. Pass
+# an int to opt into a bound only on grids where enumeration is a problem.
+DEFAULT_LOOP_PATH_CUTOFF = None
 
 
 class Structured_Overload_Distribution_Graph:
@@ -49,9 +51,11 @@ class Structured_Overload_Distribution_Graph:
             previously built overflow graph)
 
         loop_path_cutoff: int, optional
-            maximum number of nodes in a loop path enumerated by
-            :meth:`find_loops`. ``None`` disables the bound (legacy behaviour,
-            unsafe on large grids). Defaults to :data:`DEFAULT_LOOP_PATH_CUTOFF`.
+            optional maximum number of *nodes* in a loop path enumerated by
+            :meth:`find_loops`. Defaults to :data:`DEFAULT_LOOP_PATH_CUTOFF`
+            (``None`` == unbounded == the original behaviour). Pass an int only
+            to bound enumeration on grids where it would otherwise hang; too
+            small a value silently drops legitimate long loops.
 
         """
         self.g_init=g
@@ -336,7 +340,13 @@ class Structured_Overload_Distribution_Graph:
         g_red = self.g_only_red_components
 
         if only_loop_paths:
-            list_nodes_dispatch_path = list(set(self.red_loops.Path.sum()))#list(set(self.find_loops()["Path"].sum()))
+            # ``Series.sum()`` on an empty ``Path`` column returns the scalar
+            # 0 (not an empty list), so guard the no-loop case explicitly to
+            # avoid ``set(0)`` -> "int object is not iterable". ``sum(paths,
+            # [])`` concatenates the per-loop node lists and yields [] when
+            # there are no loops.
+            paths = self.red_loops.Path
+            list_nodes_dispatch_path = list(set(sum(paths, []))) if len(paths) else []
         else:
             list_nodes_dispatch_path=list(g_red.nodes)
 

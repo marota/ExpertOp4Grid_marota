@@ -948,8 +948,9 @@ class TestTagConstrainedPathSkipsCoralEdges:
 
 # ──────────────────────────────────────────────────────────────────────
 # rename_nodes: relabels the graph AND both endpoint columns of the df.
-# Regression for the copy-paste bug where ``idx_ex`` was rebuilt from
-# ``idx_or`` (so the extremity column mirrored the origin column).
+# Contract lock: ``idx_ex`` is remapped from the ``idx_ex`` column (the
+# original code did this correctly but via a misleadingly-named loop
+# variable; this pins the behaviour so a future edit can't regress it).
 # ──────────────────────────────────────────────────────────────────────
 
 

@@ -199,10 +199,13 @@ Python binding). On Debian/Ubuntu: `apt-get install graphviz`.
 - `graphs/graph_utils.delete_color_edges` accepts a single colour **or an
   iterable of colours** and removes them in one graph copy — prefer the
   multi-colour form to avoid chained full-graph copies.
-- `Structured_Overload_Distribution_Graph.find_loops` bounds simple-path
-  enumeration with `loop_path_cutoff` (default 10 nodes) to avoid hangs on
-  large grids; pass `None` to disable. Consolidation path enumeration has an
-  analogous `DEFAULT_CONSOLIDATION_PATH_CUTOFF`.
+- `Structured_Overload_Distribution_Graph.find_loops` can bound simple-path
+  enumeration with `loop_path_cutoff` to avoid hangs on very large grids, but
+  it is **opt-in**: the default is `None` (unbounded = original behaviour)
+  because rustworkx `cutoff` counts *nodes* and real grids have loop paths well
+  beyond any small bound — pass an int only where enumeration is a problem.
+  Consolidation path enumeration has an analogous opt-in
+  `DEFAULT_CONSOLIDATION_PATH_CUTOFF` (also `None`).
 - `OverFlowGraph` copies the caller's DataFrame in `__init__` (it never
   mutates the frame you pass in).
 

@@ -326,6 +326,35 @@ class TestStructuredOverloadDistributionGraph:
         assert set(nodes) == {"A", "X", "D"}
 
 
+def _make_loopless_overload_input():
+    """Constrained path with NO coral loop path -> ``red_loops`` is empty.
+
+        A --blue--> B --black--> C --blue--> D    (no coral bypass)
+    """
+    g = nx.MultiDiGraph()
+    g.add_edge("A", "B", color="blue",  capacity=-5.0, name="line_AB")
+    g.add_edge("B", "C", color="black", capacity=-10.0, name="line_BC",
+               constrained=True)
+    g.add_edge("C", "D", color="blue",  capacity=-5.0, name="line_CD")
+    return g
+
+
+class TestStructuredOverloadDistributionGraphNoLoops:
+    """Regression: an overflow graph with no loop path must not crash
+    ``get_dispatch_edges_nodes`` (empty ``Path`` column's ``.sum()`` used to
+    return the scalar 0, breaking ``set(0)``)."""
+
+    def test_loops_dataframe_is_empty(self):
+        sg = Structured_Overload_Distribution_Graph(_make_loopless_overload_input())
+        assert sg.get_loops().empty
+
+    def test_get_dispatch_edges_nodes_returns_empty_without_crashing(self):
+        sg = Structured_Overload_Distribution_Graph(_make_loopless_overload_input())
+        lines, nodes = sg.get_dispatch_edges_nodes(only_loop_paths=True)
+        assert lines == []
+        assert nodes == []
+
+
 # ---------------------------------------------------------------------------
 # Behavioural coverage — shortest_path_mandatory_and_promoted
 # ---------------------------------------------------------------------------

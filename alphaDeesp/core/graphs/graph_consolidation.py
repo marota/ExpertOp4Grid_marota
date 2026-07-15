@@ -24,13 +24,14 @@ from alphaDeesp.core.graphs.structured_overload_graph import (
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of *edges* in a simple path enumerated during consolidation
-# (networkx ``cutoff`` counts edges, unlike rustworkx which counts nodes).
-# Enumerating all simple paths is combinatorial and can hang on large grids;
-# this bound is deliberately generous so it never prunes a path on the
-# substation-scale grids the expert system targets, while still capping the
-# pathological case. ``None`` disables the bound.
-DEFAULT_CONSOLIDATION_PATH_CUTOFF = 20
+# Optional bound on the number of *edges* in a simple path enumerated during
+# consolidation (networkx ``cutoff`` counts edges, unlike rustworkx which
+# counts nodes). Enumerating all simple paths is combinatorial and can hang on
+# large grids. Like the loop-path cutoff this is **OFF by default** (``None``
+# == unbounded == original behaviour) so it can never silently prune a
+# legitimate consolidation path; pass an int to opt into a bound on grids
+# where enumeration is a problem.
+DEFAULT_CONSOLIDATION_PATH_CUTOFF = None
 
 
 class GraphConsolidationMixin:

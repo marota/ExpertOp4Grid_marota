@@ -61,13 +61,25 @@ coupling, and view/semantic entanglement inside `OverFlowGraph`.
 
 | # | Sev | Location | Issue | Status |
 |---|-----|----------|-------|--------|
-| 1 | High | `graphs/overflow_graph.py` `rename_nodes` | `idx_ex` column was rebuilt from `idx_or` (copy-paste bug), corrupting the extremity column. | **Fixed** |
-| 2 | High | `graphs/structured_overload_graph.py` `find_loops` | `rx.all_simple_paths` cutoff was commented out under a comment calling it "crucial to prevent hanging on large grids". | **Fixed** (configurable cutoff, default 10) |
+| 1 | ~~High~~ → readability | `graphs/overflow_graph.py` `rename_nodes` | **Correction:** the original was *functionally correct* — the `idx_ex` comprehension iterated the `idx_ex` column with a misleadingly-named `idx_or` loop variable. The initial "column corruption" grade was a misread, caught by adversarial re-verification. | **Clarified** (loop variable renamed; behaviour unchanged) |
+| 2 | Med (latent) | `graphs/structured_overload_graph.py` `get_dispatch_edges_nodes` | `red_loops.Path.sum()` on an empty loop DataFrame returns the scalar `0`, so `set(0)` raises `TypeError` on any grid with no loop paths. | **Fixed** (explicit empty guard) |
 | 3 | Med | `graphs/null_flow_graph.py` `_compute_sssp_paths` | bare `except Exception` silently swallowed Dijkstra failures. | **Fixed** (narrow catch + `logger.warning`) |
 | 4 | Med | `core/simulation.py` `create_df` | positional label-indexing (`df[...][line_to_cut[0]]`) assumes a contiguous `RangeIndex` aligned to line ids. | Open (documented) |
 | 5 | Med | `graphs/overflow_graph.py` `__init__` | mutated the caller's DataFrame (added `line_name`, `rename_nodes` rewrote columns). | **Fixed** (`df.copy()`) |
 | 6 | Low | `graphs/shortest_paths.py` | dead branch + incomplete MultiDiGraph promoted-edge matching. | Open |
 | 7 | Low | `core/alphadeesp.py` `to_DiGraph` | missing `capacity` defaults to `1.0`, skewing `rank_red_loops`. | Open |
+
+> **On `find_loops` and the path cutoff (review perf item / QW3).** The
+> `find_loops` code shipped with its `rx.all_simple_paths` cutoff *commented
+> out* under a comment calling it "crucial to prevent hanging on large grids".
+> Enabling it by default (cutoff = 10 nodes) was **itself a regression** —
+> caught by the adversarial verification pass: rustworkx `cutoff` counts
+> *nodes*, real RTE zone grids have loop paths of 15–42 nodes, so a default of
+> 10 silently drops legitimate loops and can empty `find_loops` (triggering
+> finding #2). The cutoff is therefore now an **opt-in parameter**
+> (`loop_path_cutoff`, default `None` = unbounded = the original behaviour); the
+> hang risk is documented and gateable rather than fixed by a lossy default.
+> The analogous consolidation-path cutoff is likewise opt-in.
 
 ---
 
@@ -167,8 +179,8 @@ model/renderer deep revision, and refreshed `CLAUDE.md`.
 
 | Recommendation | Change | Tests |
 |---|---|---|
-| QW1 — fix `rename_nodes` | `idx_ex` now maps from `idx_ex` | `TestRenameNodes` |
-| QW3 — cutoff in `find_loops` + other path sites | `loop_path_cutoff` (default 10) on `Structured_Overload_Distribution_Graph`; `DEFAULT_CONSOLIDATION_PATH_CUTOFF` on consolidation paths | existing structured-graph tests |
+| QW1 — `rename_nodes` | loop variable renamed for clarity (behaviour was already correct — see finding #1) | `TestRenameNodes` |
+| QW3 — cutoff in `find_loops` + other path sites | opt-in `loop_path_cutoff` / `DEFAULT_CONSOLIDATION_PATH_CUTOFF`, **default `None`** (unbounded = original behaviour); plus an empty-loops guard in `get_dispatch_edges_nodes` (finding #2) | `TestStructuredOverloadDistributionGraphNoLoops`, existing structured-graph tests |
 | QW4 — stop mutating caller df | `OverFlowGraph.__init__` copies the frame | `TestDoesNotMutateCallerDataFrame` |
 | QW5 — narrow the bare `except` | `(nx.NetworkXException, ValueError)` + `logger.warning` | existing null-flow tests |
 | Perf — repeated full-graph copies | `delete_color_edges` accepts multiple colours (single copy); structured graph builds each derived view in one pass | `test_graph_utils`, `test_graphs_package` |
@@ -180,10 +192,21 @@ model/renderer deep revision, and refreshed `CLAUDE.md`.
 analysis at the `graphs/` package) and the mixins → composition/Protocol deep
 revision. Both remain recommended.
 
-**Validation:** the graph-package + ranking + renderer + interactive-html unit
-suites pass locally without grid2op (340 tests). The grid2op integration suites
-(`alphadeesp_test.py`, `test_expert_op.py`, `test_expert_rules.py`, the
-`grid2op/` tests) require `grid2op` + `lightsim2grid` and were **not** run in
-this environment — the consolidation-path cutoff in particular should be
-confirmed there. The consolidation cutoff default (20 edges) is deliberately
-generous so it cannot prune paths on the ≤14-substation grids in the suite.
+**Validation.** The graph-package + ranking + renderer + interactive-html unit
+suites pass locally without grid2op (342 tests). In addition, an **adversarial
+multi-agent verification pass** (5 independent lenses) was run over the
+behaviour-preserving changes:
+
+- `delete_color_edges` single-pass union, the `_build_inflow_lookup` /
+  `sort_hubs` vectorisations, the `OverFlowGraph` model/renderer split, the
+  `except` narrowing, and the `df.copy()` were all **verified equivalent**
+  (including a 20k-trial differential fuzz of the ranking helpers).
+- The pass **caught two real issues**: the `find_loops` default-cutoff
+  regression (now reverted to opt-in) and the misread severity of the
+  `rename_nodes` finding (now corrected above).
+
+The grid2op integration suites (`alphadeesp_test.py`, `test_expert_op.py`,
+`test_expert_rules.py`, the `grid2op/` tests) require `grid2op` +
+`lightsim2grid` and were **not** run in this environment. With the cutoffs now
+defaulting to `None`, the graph-analysis behaviour on those grids is unchanged
+from `master`; running them in CI remains the recommended confirmation.
