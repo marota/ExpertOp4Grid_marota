@@ -272,10 +272,14 @@ be correct.
 - **`Grid2opSimulation.py` (~814 LOC)** monolith — split by concern.
 - **Logging vs `print`** — route the ~40 remaining `print()` calls in the older
   backends (`grid2op/`, `pypownet/`, `network.py`, `printer.py`) through `logging`.
-- **`null_flow_graph._compute_sssp_paths`** shares the multigraph weight subtlety
-  that #6 fixed in `shortest_paths` (its `attr.get("capacity")` reads `0` for every
-  parallel-edge view); left as-is because null-flow edges are ~0 capacity anyway and
-  the path is only exercisable with grid2op — worth revisiting with that backend.
+- **`null_flow_graph._compute_sssp_paths`** — the multigraph weight subtlety
+  (issue #1) is now addressed: the weight is precomputed as an edge attribute
+  (string-weight Dijkstra, perf) with a `capacity_weighted` flag — default
+  `False` = "bless" (hop-only, **bit-identical** to before), `True` = the
+  capacity-weighted fix. Callers switch via `add_relevant_null_flow_lines[_all_paths]
+  (..., capacity_weighted=True)`. The capacity-weighted routing still wants
+  validation on reference cases (needs grid2op). Follow-up perf headroom noted in
+  issue #1: target-side reverse Dijkstra and cross-call memoisation.
 
 ### Deeper revisions
 - **`Structured_Overload_Distribution_Graph`** consolidation loop still rebuilds the

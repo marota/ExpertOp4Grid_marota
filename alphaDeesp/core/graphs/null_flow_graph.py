@@ -56,8 +56,16 @@ class NullFlowGraphMixin:
         structured_graph: Any,
         non_connected_lines: List[Any],
         non_reconnectable_lines: List[Any] = [],
+        capacity_weighted: bool = False,
     ) -> None:
-        """Apply null-flow logic for all four target-path strategies."""
+        """Apply null-flow logic for all four target-path strategies.
+
+        ``capacity_weighted`` selects the null-flow path-search routing weight —
+        see :meth:`_compute_sssp_paths` (issue #1). ``False`` (default) is the
+        "bless" mode: hop-cost-only routing, bit-identical to the historical
+        behaviour. ``True`` is the capacity-weighted "fix" mode; downstream
+        callers (e.g. the recommender) opt into it here.
+        """
         non_connected_lines = self._setup_null_flow_styles(non_connected_lines, non_reconnectable_lines)
 
         structural_info = self._structural_info_for_null_flow(structured_graph)
@@ -67,7 +75,8 @@ class NullFlowGraphMixin:
                 structured_graph, non_connected_lines, non_reconnectable_lines,
                 target_path=target_path,
                 _skip_style_setup=True,
-                _structural_info=structural_info)
+                _structural_info=structural_info,
+                capacity_weighted=capacity_weighted)
 
     def add_relevant_null_flow_lines(
         self,
@@ -79,8 +88,13 @@ class NullFlowGraphMixin:
         max_null_flow_path_length: int = 7,
         _skip_style_setup: bool = False,
         _structural_info: Optional[Dict[str, Any]] = None,
+        capacity_weighted: bool = False,
     ) -> None:
-        """Make null-flow edges bidirectional and recolour relevant ones."""
+        """Make null-flow edges bidirectional and recolour relevant ones.
+
+        ``capacity_weighted`` is forwarded to the path search — see
+        :meth:`_compute_sssp_paths` (issue #1 "bless or fix").
+        """
         if not _skip_style_setup:
             non_connected_lines = self._setup_null_flow_styles(
                 non_connected_lines, non_reconnectable_lines)
@@ -108,6 +122,7 @@ class NullFlowGraphMixin:
             edges_non_reconnectable_lines,
             depth_reconnectable_edges_search,
             max_null_flow_path_length,
+            capacity_weighted,
         )
 
         self._apply_null_flow_recoloring(
@@ -195,6 +210,7 @@ class NullFlowGraphMixin:
         edges_non_reconnectable_lines: Set[Any],
         depth_reconnectable_edges_search: int,
         max_null_flow_path_length: int,
+        capacity_weighted: bool = False,
     ) -> Tuple[Set[Any], Set[Any]]:
         """Per-component dispatch to detect_edges_to_keep for the chosen strategy."""
         node_red_paths = structural_info["node_red_paths"]
@@ -209,7 +225,8 @@ class NullFlowGraphMixin:
                 g_c, sources, targets,
                 edges_non_connected_lines, edges_non_reconnectable_lines,
                 depth_edges_search=depth_reconnectable_edges_search,
-                max_null_flow_path_length=max_null_flow_path_length)
+                max_null_flow_path_length=max_null_flow_path_length,
+                capacity_weighted=capacity_weighted)
             edges_to_keep.update(keep)
             edges_non_reconnectable.update(non_rec)
 
@@ -313,6 +330,7 @@ class NullFlowGraphMixin:
         non_reconnectable_edges: List[Any] = [],
         depth_edges_search: int = 2,
         max_null_flow_path_length: int = 7,
+        capacity_weighted: bool = False,
     ) -> Tuple[Set[Any], Set[Any]]:
         """Detect edges of interest on short paths between source and target nodes."""
         prepared = self._prepare_detect_edges_inputs(
@@ -321,7 +339,8 @@ class NullFlowGraphMixin:
         if prepared is None:
             return set(), set()
 
-        sssp_paths_cache = self._compute_sssp_paths(g_c, prepared, edges_of_interest)
+        sssp_paths_cache = self._compute_sssp_paths(
+            g_c, prepared, edges_of_interest, capacity_weighted=capacity_weighted)
         paths_of_interest = self._collect_paths_of_interest(
             g_c, prepared, sssp_paths_cache, max_null_flow_path_length)
         return self._classify_paths_by_reconnectability(prepared, paths_of_interest)
@@ -428,19 +447,60 @@ class NullFlowGraphMixin:
         g_c: nx.MultiDiGraph,
         prepared: Dict[str, Any],
         edges_of_interest: Set[Any],
+        capacity_weighted: bool = False,
     ) -> Dict[Any, Any]:
-        """Run single-source Dijkstra per source with an incentivised weight function."""
+        """Single-source Dijkstra per source over a *precomputed* edge weight.
+
+        The routing weight is materialised once as an edge attribute and Dijkstra
+        is run with a **string** weight instead of a per-edge-relaxation Python
+        callable — the callable is networkx's slowest weight mode and this search
+        is the dominant non-load-flow cost of the overflow-graph build at national
+        scale (see issue #1).
+
+        Two weighting modes (issue #1, "bless or fix"):
+
+        * ``capacity_weighted=False`` (**default — "Option A", bless**): reproduces
+          the historical *effective* behaviour on the overflow ``MultiDiGraph``.
+          networkx hands a callable weight the ``{key: attr}`` parallel-edge view,
+          so the old ``attr.get("capacity", 0)`` silently read ``0`` and the
+          ``(u, v)`` promoted test never matched the ``(u, v, key)`` set — routing
+          was a *uniform hop cost*. We keep exactly that (weight ≡ hop cost) but
+          make it explicit and fast. Output is bit-identical to the pre-refactor
+          code.
+        * ``capacity_weighted=True`` (**"Option B", fix**): capacity-weighted
+          routing as originally intended — the minimum capacity across parallel
+          edges dominates (``capacity * HUGE + hop``), with correct multigraph
+          promoted matching (``(u, v)`` or the exact ``(u, v, key)``). **This
+          changes routing** and should be validated on reference cases; callers
+          opt in via ``add_relevant_null_flow_lines[_all_paths](...,
+          capacity_weighted=True)``.
+        """
         HUGE_MULTIPLIER = 1_000_000_000
         NORMAL_HOP_COST = 100
         PROMOTED_HOP_COST = 33
-        promoted_set = set(edges_of_interest)
+        WEIGHT_ATTR = "_nf_weight"
 
-        def incentivized_weight(u: Any, v: Any, attr: Dict[str, Any]) -> float:
-            real_weight = attr.get("capacity", 0)
-            if real_weight < 0:
-                raise ValueError("Negative weights not allowed.")
-            hop_cost = PROMOTED_HOP_COST if (u, v) in promoted_set else NORMAL_HOP_COST
-            return (real_weight * HUGE_MULTIPLIER) + hop_cost
+        promoted_edges = set(edges_of_interest)                        # (u, v, key) tuples
+        promoted_pairs = {(e[0], e[1]) for e in promoted_edges}        # (u, v) pairs
+
+        # One O(E) pass: materialise the routing weight on every edge so Dijkstra
+        # can use a fast string weight (min over parallel edges for a multigraph).
+        weights: Dict[Any, float] = {}
+        for u, v, key, data in g_c.edges(keys=True, data=True):
+            if capacity_weighted:
+                capacity = data.get("capacity", 0)
+                if capacity < 0:
+                    raise ValueError("Negative weights not allowed.")
+                promoted = (u, v) in promoted_pairs or (u, v, key) in promoted_edges
+                base = capacity * HUGE_MULTIPLIER
+            else:
+                # Bless: capacity ignored (as the old callable did on a multigraph)
+                # and the historical 2-tuple-vs-3-tuple promoted test, which never
+                # engaged — i.e. a uniform hop weight. Bit-identical to before.
+                promoted = (u, v) in promoted_edges
+                base = 0
+            weights[(u, v, key)] = base + (PROMOTED_HOP_COST if promoted else NORMAL_HOP_COST)
+        nx.set_edge_attributes(g_c, weights, WEIGHT_ATTR)
 
         bfs_cache = prepared["bfs_cache"]
         targets_with_bfs = prepared["targets_with_bfs"]
@@ -455,7 +515,7 @@ class NullFlowGraphMixin:
                 continue
             try:
                 sssp_paths_cache[source_node] = nx.single_source_dijkstra_path(
-                    g_c, source_node, weight=incentivized_weight)
+                    g_c, source_node, weight=WEIGHT_ATTR)
             except (nx.NetworkXException, ValueError) as exc:
                 # Expected failure modes: source absent from the component
                 # (NetworkXException) or a negative capacity reaching the
