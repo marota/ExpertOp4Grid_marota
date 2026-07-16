@@ -453,6 +453,112 @@ class TestInitialInflowBetween:
         assert AlphaDeesp._initial_inflow_between(df, source=99, target=100) == 0.0
 
 
+class TestBuildInflowLookup:
+    """``_build_inflow_lookup`` precomputes the same values the linear
+    ``_initial_inflow_between`` scan returns, for every orientation."""
+
+    def test_lookup_matches_linear_scan_for_all_orientations(self):
+        import pandas as pd
+        df = pd.DataFrame({
+            "idx_or": [3, 5, 4],
+            "idx_ex": [5, 3, 4],
+            "init_flows": [12.0, -7.0, 0.0],
+        })
+        lookup = AlphaDeesp._build_inflow_lookup(df)
+        nodes = [3, 4, 5, 99]
+        for source in nodes:
+            for target in nodes:
+                assert lookup.get((source, target), 0.0) == \
+                    AlphaDeesp._initial_inflow_between(df, source, target)
+
+    def test_first_matching_row_wins(self):
+        import pandas as pd
+        # two rows both mapping (3 -> 5): the first (12.0) must win, exactly
+        # like the first-match semantics of the linear scan.
+        df = pd.DataFrame({
+            "idx_or": [3, 3],
+            "idx_ex": [5, 5],
+            "init_flows": [12.0, 4.0],
+        })
+        lookup = AlphaDeesp._build_inflow_lookup(df)
+        assert lookup[(3, 5)] == 12.0
+        assert lookup[(3, 5)] == AlphaDeesp._initial_inflow_between(df, 3, 5)
+
+
+class TestAutoRunSeparation:
+    """``auto_run=False`` builds the object without running the ranking
+    pipeline; ``run()`` populates the results. A trivial graph (no black
+    constrained edge) would make the pipeline raise, which lets us prove the
+    constructor did NOT run it."""
+
+    @staticmethod
+    def _trivial():
+        import pandas as pd
+        g = nx.MultiDiGraph()
+        g.add_edge(0, 1, color="gray", capacity=0.0, name="l0")
+        df = pd.DataFrame({"idx_or": [0], "idx_ex": [1], "init_flows": [0.0]})
+        return g, df
+
+    def test_no_pipeline_when_auto_run_false(self):
+        g, df = self._trivial()
+        # Would raise inside the pipeline (no constrained edge); must NOT raise.
+        ad = AlphaDeesp(g, df, simulator_data={"substations_elements": {}},
+                        auto_run=False)
+        assert ad.g_distribution_graph is None
+        assert ad.get_ranked_combinations() == []
+        assert ad.rankedLoopBuses == {}
+        # state that the constructor still sets
+        assert ad.initial_graph.number_of_edges() == 1
+
+    def test_run_is_invoked_by_default(self):
+        # A real pipeline needs a valid overflow graph; here we only assert that
+        # auto_run defaults to True by observing the pipeline is attempted
+        # (raises on the trivial graph) — i.e. the default path calls run().
+        g, df = self._trivial()
+        import pytest
+        with pytest.raises(Exception):
+            AlphaDeesp(g, df, simulator_data={"substations_elements": {}})
+
+
+class _SortHubsHost:
+    """Expose the vectorised ``sort_hubs`` on a bare object."""
+    sort_hubs = AlphaDeesp.sort_hubs
+
+    def __init__(self, df):
+        self.df = df
+
+
+class TestSortHubs:
+    """``sort_hubs`` ranks nodes by the larger of their total absolute
+    incident delta-flow entering (``idx_ex``) or leaving (``idx_or``)."""
+
+    def test_ranks_by_max_incident_abs_delta(self):
+        import pandas as pd
+        df = pd.DataFrame({
+            "idx_or": [0, 1, 2],
+            "idx_ex": [1, 2, 0],
+            "delta_flows": [10.0, -30.0, 5.0],
+        })
+        host = _SortHubsHost(df)
+        res = host.sort_hubs([0, 1, 2])
+        strength = dict(zip(res["hubs"], res["max_flows"]))
+        # node 0: out={|10|}=10, in={|5|}=5 -> 10
+        # node 1: out={|-30|}=30, in={|10|}=10 -> 30
+        # node 2: out={|5|}=5, in={|-30|}=30 -> 30
+        assert strength[0] == 10.0
+        assert strength[1] == 30.0
+        assert strength[2] == 30.0
+        # sorted descending: node 0 (weakest) is last.
+        assert list(res["hubs"])[-1] == 0
+
+    def test_none_when_no_hubs(self):
+        import pandas as pd
+        host = _SortHubsHost(pd.DataFrame(
+            {"idx_or": [], "idx_ex": [], "delta_flows": []}))
+        assert host.sort_hubs([]) is None
+        assert host.sort_hubs(None) is None
+
+
 class TestBusLoopStrength:
     """``_bus_loop_strength`` = ``(non_red_inflow + local_production) *
     red_delta_inflow``."""
@@ -494,6 +600,26 @@ class TestBusLoopStrength:
         assert host._bus_loop_strength(
             5, df_init, color_attrs, label_attrs) == 0.0
 
+    def test_inflow_lookup_path_matches_linear_fallback(self):
+        import pandas as pd
+        g = nx.MultiDiGraph()
+        g.add_edge(10, 5, label="3", color="coral")
+        g.add_edge(4, 5, label="0", color="gray")
+        sim_data = {"substations_elements": {
+            5: [Production(busbar_id=0, value=2.0)]
+        }}
+        host = _LoopBusHost(sim_data, g)
+        df_init = pd.DataFrame({
+            "idx_or": [4], "idx_ex": [5], "init_flows": [6.0],
+        })
+        color_attrs = nx.get_edge_attributes(g, "color")
+        label_attrs = nx.get_edge_attributes(g, "label")
+        lookup = AlphaDeesp._build_inflow_lookup(df_init)
+        # fast path (precomputed lookup) must equal the linear fallback.
+        assert host._bus_loop_strength(
+            5, df_init, color_attrs, label_attrs, inflow_lookup=lookup) == \
+            host._bus_loop_strength(5, df_init, color_attrs, label_attrs)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Tests for to_DiGraph (MultiDiGraph -> weighted DiGraph conversion)
@@ -518,11 +644,20 @@ class TestToDiGraph:
         assert isinstance(result, nx.DiGraph)
         assert result["A"]["B"]["capacity"] == 5.0
 
-    def test_defaults_missing_capacity_to_one(self):
+    def test_defaults_missing_capacity_to_zero(self):
+        # A genuinely missing capacity must contribute 0 to the min-cut used by
+        # rank_red_loops, not a spurious unit weight.
         g = nx.MultiDiGraph()
         g.add_edge("A", "B")  # no capacity
         result = self._call(g)
-        assert result["A"]["B"]["capacity"] == 1.0
+        assert result["A"]["B"]["capacity"] == 0.0
+
+    def test_missing_and_present_capacity_sum(self):
+        g = nx.MultiDiGraph()
+        g.add_edge("A", "B", capacity=4.0)
+        g.add_edge("A", "B")  # missing -> contributes 0
+        result = self._call(g)
+        assert result["A"]["B"]["capacity"] == 4.0
 
     def test_preserves_distinct_edges(self):
         g = nx.MultiDiGraph()

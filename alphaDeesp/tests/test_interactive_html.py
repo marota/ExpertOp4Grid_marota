@@ -495,3 +495,28 @@ def test_html_embeds_section_field_and_inserts_section_headers():
     assert "Structural Paths" in sections
     assert "Individual entities properties" in sections
     assert "Flow redispatch values" in sections
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Externalised assets: CSS/JS/HTML skeleton now live under assets/ and are
+# reassembled at runtime by template.html_template().
+# ──────────────────────────────────────────────────────────────────────
+
+class TestExternalisedAssets:
+    def test_asset_files_exist(self):
+        from pathlib import Path
+        import alphaDeesp.core.interactive_html as ih_pkg
+        assets = Path(ih_pkg.__file__).parent / "assets"
+        for name in ("viewer.css", "viewer.js", "template.html"):
+            assert (assets / name).is_file(), f"missing asset {name}"
+
+    def test_template_reconstitution_inlines_css_and_js(self):
+        from alphaDeesp.core.interactive_html.template import html_template
+        tpl = html_template()
+        # placeholders for per-render substitution survive…
+        assert "__TITLE__" in tpl and "__SVG__" in tpl and "__MODEL_JSON__" in tpl
+        # …and the externalised CSS + JS have been inlined back in.
+        assert ":root {" in tpl                      # from viewer.css
+        assert "const MODEL = __MODEL_JSON__;" in tpl  # from viewer.js
+        # the split markers must be fully consumed
+        assert "__CSS__" not in tpl and "__JS__" not in tpl

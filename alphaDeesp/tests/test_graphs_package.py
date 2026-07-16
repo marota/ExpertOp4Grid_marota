@@ -35,14 +35,23 @@ from alphaDeesp.core.graphs import (
 # Structural invariants of the refactor
 # ---------------------------------------------------------------------------
 
-# The 16 public names the refactor commits to exporting, in the same order
+# The public names the refactor commits to exporting, in the same order
 # as ``alphaDeesp/core/graphs/__init__.py::__all__``.
 EXPECTED_PUBLIC_NAMES = frozenset({
     "default_voltage_colors",
     "PowerFlowGraph",
     "OverFlowGraph",
+    "OverflowGraphRenderer",
     "ConstrainedPath",
     "Structured_Overload_Distribution_Graph",
+    "edge_role_of",
+    "base_color_of",
+    "EDGE_ROLE_OVERLOAD",
+    "EDGE_ROLE_NEGATIVE",
+    "EDGE_ROLE_POSITIVE",
+    "EDGE_ROLE_INSIGNIFICANT",
+    "EDGE_ROLE_NULL_NON_RECONNECTABLE",
+    "EDGE_ROLE_UNKNOWN",
     "from_edges_get_nodes",
     "delete_color_edges",
     "nodepath_to_edgepath",
@@ -62,9 +71,18 @@ EXPECTED_SYMBOL_SUBMODULE = {
     "default_voltage_colors": "alphaDeesp.core.graphs.constants",
     "PowerFlowGraph": "alphaDeesp.core.graphs.power_flow_graph",
     "OverFlowGraph": "alphaDeesp.core.graphs.overflow_graph",
+    "OverflowGraphRenderer": "alphaDeesp.core.graphs.overflow_renderer",
     "ConstrainedPath": "alphaDeesp.core.graphs.constrained_path",
     "Structured_Overload_Distribution_Graph":
         "alphaDeesp.core.graphs.structured_overload_graph",
+    "edge_role_of": "alphaDeesp.core.graphs.edge_roles",
+    "base_color_of": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_OVERLOAD": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_NEGATIVE": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_POSITIVE": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_INSIGNIFICANT": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_NULL_NON_RECONNECTABLE": "alphaDeesp.core.graphs.edge_roles",
+    "EDGE_ROLE_UNKNOWN": "alphaDeesp.core.graphs.edge_roles",
     "from_edges_get_nodes": "alphaDeesp.core.graphs.graph_utils",
     "delete_color_edges": "alphaDeesp.core.graphs.graph_utils",
     "nodepath_to_edgepath": "alphaDeesp.core.graphs.graph_utils",
@@ -80,6 +98,7 @@ EXPECTED_SYMBOL_SUBMODULE = {
 
 EXPECTED_SUBMODULES = frozenset({
     "constants",
+    "edge_roles",
     "graph_utils",
     "null_flow",
     "shortest_paths",
@@ -87,6 +106,7 @@ EXPECTED_SUBMODULES = frozenset({
     "constrained_path",
     "structured_overload_graph",
     "overflow_graph",
+    "overflow_renderer",
 })
 
 
@@ -321,6 +341,75 @@ class TestStructuredOverloadDistributionGraph:
         lines, nodes = sg.get_dispatch_edges_nodes()
         assert set(lines) == {"line_AX", "line_XD"}
         assert set(nodes) == {"A", "X", "D"}
+
+    def test_derived_colour_views_are_cached(self):
+        """Lazy cached properties return the same object on repeated access."""
+        sg = Structured_Overload_Distribution_Graph(_make_structured_overload_input())
+        assert sg.g_only_red_components is sg.g_only_red_components
+        assert sg.g_only_blue_components is sg.g_only_blue_components
+        assert sg.g_without_constrained_edge is sg.g_without_constrained_edge
+
+    def test_lazy_results_are_order_independent(self):
+        """Accessing hubs before loops (or vice-versa) yields identical results —
+        the ``red_loops`` cache is keyed on the seed hubs, not the detected ones."""
+        sg_a = Structured_Overload_Distribution_Graph(_make_structured_overload_input())
+        loops_first = [list(p) for p in sg_a.red_loops["Path"].tolist()]
+        hubs_after = set(sg_a.get_hubs())
+
+        sg_b = Structured_Overload_Distribution_Graph(_make_structured_overload_input())
+        hubs_first = set(sg_b.get_hubs())
+        loops_after = [list(p) for p in sg_b.red_loops["Path"].tolist()]
+
+        assert loops_first == loops_after
+        assert hubs_after == hubs_first == {"A", "D"}
+
+    def test_get_loops_returns_the_cached_seed_red_loops(self):
+        sg = Structured_Overload_Distribution_Graph(_make_structured_overload_input())
+        assert sg.get_loops() is sg.red_loops
+
+    def test_lazy_views_are_frozen_to_construction_snapshot(self):
+        """The lazy views must reflect the graph *as it was at construction*,
+        even if the caller mutates the shared graph before the views are first
+        accessed (consolidate_graph removes ignored lines from the same graph
+        this object was built on). Matches the OLD eager construction-time copy.
+        """
+        g = _make_structured_overload_input()
+        sg = Structured_Overload_Distribution_Graph(g)
+        # Mutate the caller's graph AFTER construction, BEFORE any view access.
+        g.remove_edge("A", "X")  # drop a coral loop edge (line_AX)
+        # Views/loops must still see the construction-time coral loop A->X->D.
+        assert "X" in set(sg.g_only_red_components.nodes)
+        loops = [list(p) for p in sg.get_loops()["Path"].tolist()]
+        assert ["A", "X", "D"] in loops
+
+
+def _make_loopless_overload_input():
+    """Constrained path with NO coral loop path -> ``red_loops`` is empty.
+
+        A --blue--> B --black--> C --blue--> D    (no coral bypass)
+    """
+    g = nx.MultiDiGraph()
+    g.add_edge("A", "B", color="blue",  capacity=-5.0, name="line_AB")
+    g.add_edge("B", "C", color="black", capacity=-10.0, name="line_BC",
+               constrained=True)
+    g.add_edge("C", "D", color="blue",  capacity=-5.0, name="line_CD")
+    return g
+
+
+class TestStructuredOverloadDistributionGraphNoLoops:
+    """Regression: an overflow graph with no loop path must not crash
+    ``get_dispatch_edges_nodes`` (empty ``Path`` column's ``.sum()`` used to
+    return the scalar 0, breaking ``set(0)``)."""
+
+    def test_loops_dataframe_is_empty(self):
+        sg = Structured_Overload_Distribution_Graph(_make_loopless_overload_input())
+        assert sg.get_loops().empty
+
+    def test_get_dispatch_edges_nodes_returns_empty_without_crashing(self):
+        sg = Structured_Overload_Distribution_Graph(_make_loopless_overload_input())
+        lines, nodes = sg.get_dispatch_edges_nodes(only_loop_paths=True)
+        assert lines == []
+        assert nodes == []
 
 
 # ---------------------------------------------------------------------------

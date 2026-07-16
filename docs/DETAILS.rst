@@ -7,20 +7,25 @@ Call
 
 Calling the alphaDeesp engine is done like so :
 
-``alphadeesp = AlphaDeesp(g_over, df_of_g, custom_layout, printer, simulator_data,sim.substation_in_cooldown, debug = debug)``
+``alphadeesp = AlphaDeesp(g_over, df_of_g, simulator_data, sim.substation_in_cooldown, debug=debug)``
 ``ranked_combinations = alphadeesp.get_ranked_combinations()``
 
-Alphadeesp hence gives you an oredered list of substations and topologies that should be relevant to solve your overload
+By default the ranking pipeline runs in the constructor. Pass ``auto_run=False``
+and call ``alphadeesp.run()`` for staged/testable execution.
+
+Alphadeesp hence gives you an ordered list of substations and topologies that should be relevant to solve your overload
 
 Inputs
 ======
 The following inputs will be required to be computed by the Simulation override.
 
 * ``g_over``
-    A newtorkx graph representation of the grid with flow values
+    A networkx ``MultiDiGraph`` representation of the grid with flow values (an
+    :class:`~alphaDeesp.core.graphs.overflow_graph.OverFlowGraph`'s ``.g``).
 
 * ``df_of_g``
-    A dataframe representing a detailed view of the graph
+    A dataframe representing a detailed view of the graph (one row per line;
+    see :meth:`~alphaDeesp.core.simulation.Simulation.get_dataframe`).
 
 .. image:: ../alphaDeesp/ressources/df_of_g_l9PNG.png
 
@@ -29,12 +34,6 @@ The following inputs will be required to be computed by the Simulation override.
 .. image:: ../alphaDeesp/ressources/g_pow_prime_grid2op_ltc9.PNG
 
 .. image:: ../alphaDeesp/ressources/g_over_df_l9.png
-
-* ``custom_layout``
-    The layout of the graph (list of (X,Y) coordinate for edges. Used for plotting.
-
-* ``printer``
-    A printer service for logs and graphs
 
 * ``simulator_data``
     A dict composed of :

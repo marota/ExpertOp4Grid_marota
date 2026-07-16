@@ -8,3 +8,4 @@ include alphaDeesp/ressources/parameters/l2rpn_2019/difficulty_levels.json
 include alphaDeesp/ressources/parameters/l2rpn_2019/grid.json
 include alphaDeesp/ressources/parameters/l2rpn_2019/grid_layout.json
 include alphaDeesp/ressources/parameters/l2rpn_2019/prods_charac.csv
+include alphaDeesp/core/interactive_html/assets/*

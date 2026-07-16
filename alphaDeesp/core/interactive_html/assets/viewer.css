@@ -1,0 +1,48 @@
+
+  :root {
+    --bg: #fafafa; --panel: #ffffff; --border: #d0d7de;
+    --muted: #6b7280; --accent: #0969da; --dim-opacity: 0.12;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: #111; }
+  #app { display: flex; height: 100vh; }
+  #sidebar {
+    width: 280px; flex-shrink: 0; padding: 12px 14px; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--border); font-size: 13px;
+  }
+  #sidebar h1 { font-size: 14px; margin: 0 0 6px; }
+  #sidebar h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; letter-spacing: 0.04em; }
+  #sidebar .layer-section-header { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; letter-spacing: 0.03em; font-weight: 600; border-top: 1px solid var(--border); padding-top: 6px; }
+  #sidebar .layer-section-header:first-of-type { border-top: none; padding-top: 0; margin-top: 4px; }
+  #sidebar input[type=text] { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
+  #sidebar label { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; }
+  #sidebar label .swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #ccc; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+  #sidebar label .swatch svg { width: 10px; height: 10px; display: block; }
+  #sidebar .layer-controls { display: flex; gap: 8px; font-size: 11px; margin-bottom: 4px; }
+  #sidebar .layer-controls button { background: transparent; border: none; padding: 2px 4px; cursor: pointer; color: var(--accent); font-size: 11px; text-decoration: underline; }
+  #sidebar .layer-controls button:hover { background: #eef; }
+  #sidebar .hint { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 6px; }
+  #info { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: #f6f8fa; border-radius: 4px; padding: 8px; min-height: 60px; }
+  #stage { flex: 1; position: relative; overflow: hidden; background: var(--bg); }
+  #stage svg { display: block; width: 100%; height: 100%; cursor: grab; }
+  #stage svg.dragging { cursor: grabbing; }
+  #stage .toolbar { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 2px; }
+  #stage .toolbar button { border: none; background: transparent; padding: 4px 8px; cursor: pointer; font-size: 14px; font-weight: bold; color: #333; }
+  #stage .toolbar button:hover { background: #eef; }
+  #tooltip { position: absolute; pointer-events: none; background: rgba(20,20,20,0.92); color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 11px; line-height: 1.4; max-width: 260px; z-index: 10; display: none; }
+  #tooltip .key { color: #9ad; }
+  /* Interaction states applied via classes on the root <g class="graph"> */
+  .graph.has-selection .node:not(.hl):not(.selected),
+  .graph.has-selection .edge:not(.hl) { opacity: var(--dim-opacity); }
+  .graph .node.selected ellipse,
+  .graph .node.selected polygon,
+  .graph .node.selected circle { stroke-width: 5px; }
+  /* Unchecked layers stay rendered but recede to a near-transparent
+     light-grey so the user retains spatial context. Applied to both
+     nodes and edges. Pointer-events kept enabled so hover/click still
+     works on dimmed elements. */
+  .graph .layer-off { opacity: 0.12; }
+  .graph.has-search .node:not(.match) { opacity: var(--dim-opacity); }
+  .graph .node.match ellipse,
+  .graph .node.match polygon,
+  .graph .node.match circle { stroke: #0969da !important; stroke-width: 4px; }

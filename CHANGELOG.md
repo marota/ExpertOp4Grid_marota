@@ -1,5 +1,81 @@
 # Changelog
 
+## [0.3.3] - 2026-07-16
+
+Large architecture-review pass over the `alphaDeesp` graph layer: correctness
+fixes, performance work, two deep revisions, the interactive-viewer
+decomposition, and the fix for the multigraph Dijkstra-weight bug (issue #1).
+All changes are unit-tested (372 runnable tests without grid2op) and checked by
+adversarial multi-agent verification. Public import paths are unchanged.
+
+### Bug Fixes
+
+- **Multigraph Dijkstra weight in the null-flow path search** (issue #1): on the
+  overflow `MultiDiGraph`, networkx passes a callable weight the `{key: attr}`
+  parallel-edge view, so `_compute_sssp_paths`'s `attr.get("capacity", 0)`
+  silently read `0` and routing was hop-cost-only. The routing weight is now
+  precomputed as an edge attribute (string-weight Dijkstra) with a
+  `capacity_weighted` switch: `False` (default) reproduces the historical
+  behaviour **bit-identical** ("bless"); `True` enables capacity-weighted routing
+  with correct min-parallel capacity and `(u,v)`/`(u,v,key)` promoted matching
+  ("fix"). Threaded through `add_relevant_null_flow_lines[_all_paths]` so
+  downstream callers can opt in without patching.
+- **`shortest_paths.py`**: removed a dead branch and made the promoted-edge
+  matching multigraph-correct (was silently weighting every parallel edge as `0`).
+- **`OverFlowGraph.__init__` no longer mutates the caller's DataFrame** (copies
+  it); `rename_nodes` loop variable clarified (behaviour unchanged).
+- **`Structured_Overload_Distribution_Graph.get_dispatch_edges_nodes`** guards
+  the empty-loops case (`red_loops.Path.sum()` no longer raises `TypeError` on a
+  grid with no loop paths).
+- **`to_DiGraph`** defaults a missing edge `capacity` to `0.0` (was `1.0`), which
+  no longer skews `rank_red_loops`' min-cut.
+
+### New Features / Deep revisions
+
+- **`OverFlowGraph` model/renderer split**: new
+  `graphs/overflow_renderer.py::OverflowGraphRenderer` owns all Graphviz
+  presentation (penwidth, shapes, tapered styling, compound highlight colours,
+  plotting); `OverFlowGraph` keeps the semantic model. New
+  `graphs/edge_roles.py::edge_role_of` (+ `EDGE_ROLE_*`, `OverFlowGraph.edge_role`)
+  is the single authority mapping an edge's base colour to a semantic role, so no
+  consumer parses Graphviz colour strings; `highlight_significant_line_loading`
+  records an authoritative `base_color`.
+- **`AlphaDeesp` explicit pipeline**: the ranking pipeline moved to `run()`;
+  `AlphaDeesp(..., auto_run=True)` (default) preserves the previous behaviour,
+  `auto_run=False` builds the object without side effects.
+- **Lazy `Structured_Overload_Distribution_Graph`**: colour-filtered views,
+  `red_loops` and `hubs` are `functools.cached_property` computed from a
+  construction-time snapshot — behaviour-identical and order-independent.
+
+### Performance
+
+- `delete_color_edges` accepts a colour **or an iterable of colours**, removing
+  them in a single graph copy; the structured graph builds its derived views in
+  single passes.
+- `sort_hubs` and the initial-inflow lookup in `AlphaDeesp` are vectorised
+  (were per-hub / per-edge `iterrows` scans).
+- `simulation.create_df` is vectorised (was several `iterrows` passes;
+  400-case differential fuzz pins equivalence).
+- Null-flow Dijkstra uses a precomputed string weight instead of a per-edge
+  Python callable.
+
+### Maintainability
+
+- `core/interactive_html.py` (976 LOC) split into the `core/interactive_html/`
+  package (8 focused modules) with the CSS/JS/HTML skeleton externalised under
+  `assets/` and reassembled byte-exactly at runtime (`package_data` shipped).
+- `find_loops` / consolidation path enumeration gained opt-in cutoffs
+  (`loop_path_cutoff`, default `None` = unbounded = original behaviour).
+- New `docs/CODE_REVIEW.md` (full review + downstream-impact analysis on
+  `Expert_op4grid_recommender` + remaining-work backlog); `CLAUDE.md` refreshed.
+
+### Tests
+
+- New suites: `test_edge_roles.py`, `test_overflow_renderer.py`,
+  `test_simulation_create_df.py`, `test_null_flow_weighting.py`; expanded
+  `test_graphs_package.py`, `test_overflow_graph.py`, `test_alphadeesp_unit.py`,
+  `test_shortest_paths.py`, `test_interactive_html.py`.
+
 ## [0.3.2.post4] - 2026-06-17
 
 ### New Features

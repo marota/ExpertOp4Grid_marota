@@ -20,3 +20,10 @@ Welcome to ExpertOp4Grid's documentation!
 
    DESCRIPTION.rst
    DETAILS.rst
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer documentation
+
+   ARCHITECTURE.rst
+   API.rst

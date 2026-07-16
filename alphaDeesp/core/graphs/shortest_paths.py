@@ -5,9 +5,50 @@ a specific optimisation strategy — minimise physical weight first, then
 favour promoted edges, then minimise hop count.
 """
 
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
+
+
+def _make_incentivized_weight(
+    G: Any,
+    weight_attr: str,
+    huge_multiplier: float,
+    normal_hop_cost: float,
+    promoted_hop_cost: float,
+    promoted_set: Set[Any],
+) -> Any:
+    """Build a Dijkstra weight fn ``(physical_weight * huge) + hop_cost``.
+
+    Physical weight dominates; ``hop_cost`` is ``promoted_hop_cost`` on a promoted
+    edge, else ``normal_hop_cost`` — so among equal-weight paths the one using
+    more promoted edges (then fewer hops) wins.
+
+    Handles **both** graph kinds correctly. For a ``MultiDiGraph`` networkx
+    passes the ``{key: attr}`` view of the parallel edges, so we take the minimum
+    physical weight across them and treat the connection as promoted when either
+    ``(u, v)`` or any ``(u, v, key)`` is in ``promoted_set``. For a plain graph
+    the single attribute dict is used directly. (The historical closures called
+    ``attr.get(weight_attr)`` unconditionally, which silently read ``0`` for
+    every multigraph edge.)
+    """
+    is_multi = G.is_multigraph()
+
+    def incentivized_weight(u: Any, v: Any, attr: Dict[Any, Any]) -> float:
+        if is_multi:
+            weights = [d.get(weight_attr, 0) for d in attr.values()]
+            real_weight = min(weights) if weights else 0
+            promoted = (u, v) in promoted_set or any(
+                (u, v, key) in promoted_set for key in attr.keys())
+        else:
+            real_weight = attr.get(weight_attr, 0)
+            promoted = (u, v) in promoted_set
+        if real_weight < 0:
+            raise ValueError("Dijkstra does not accept negative weights.")
+        hop_cost = promoted_hop_cost if promoted else normal_hop_cost
+        return (real_weight * huge_multiplier) + hop_cost
+
+    return incentivized_weight
 
 
 def shortest_path_min_weight_then_hops(G: Any, source: Any, target: Any, mandatory_edge: Tuple[Any, ...], weight_attr: str = "weight") -> Tuple[Optional[List[Any]], float]:
@@ -21,15 +62,11 @@ def shortest_path_min_weight_then_hops(G: Any, source: Any, target: Any, mandato
     # Must be larger than the max possible number of edges in a path (e.g., number of nodes).
     MULTIPLIER = 1_000_000
 
-    # Define the custom weight function for Dijkstra
-    # Returns: (Actual_Weight * 1,000,000) + 1
-    def composite_weight(u, v, attr):
-        # Handle MultiDiGraph: attr might be the inner dict or we might be iterating keys
-        # nx.dijkstra_path passes the edge attribute dictionary directly
-        w = attr.get(weight_attr, 0)  # Default to 0 if no weight
-        if w < 0:
-            raise ValueError("Dijkstra does not accept negative weights.")
-        return (w * MULTIPLIER) + 1
+    # Weight fn: (Actual_Weight * 1,000,000) + 1. No promotion here, so the hop
+    # cost is a constant 1 (pure min-weight then min-hops).
+    composite_weight = _make_incentivized_weight(
+        G, weight_attr, MULTIPLIER,
+        normal_hop_cost=1, promoted_hop_cost=1, promoted_set=set())
 
     # Unpack mandatory edge
     u, v = mandatory_edge[0], mandatory_edge[1]
@@ -96,27 +133,11 @@ def shortest_path_mandatory_and_promoted(G: Any, source: Any, target: Any, manda
     NORMAL_HOP_COST = 100
     PROMOTED_HOP_COST = 1
 
-    # Optimization: Set for O(1) lookup
-    promoted_set = set(promoted_edges)
-
-    # --- 1. Define the Custom Weight Function ---
-    def incentivized_weight(u, v, attr):
-        # A. Physical Cost
-        real_weight = attr.get(weight_attr, 0)
-        if real_weight < 0:
-            raise ValueError("Dijkstra does not accept negative weights.")
-
-        # B. Preference Cost
-        is_promoted = (u, v) in promoted_set
-
-        # Note: For MultiDiGraph, strict key checking would require iterating G[u][v]
-        # or checking if ANY parallel edge is promoted.
-        # Here we assume if the connection (u,v) is promoted, we take the bonus.
-
-        hop_cost = PROMOTED_HOP_COST if is_promoted else NORMAL_HOP_COST
-
-        # Formula: (Physical_Weight * HUGE) + Preference_Cost
-        return (real_weight * HUGE_MULTIPLIER) + hop_cost
+    # --- 1. Custom weight fn (multigraph-correct promoted matching) ---
+    incentivized_weight = _make_incentivized_weight(
+        G, weight_attr, HUGE_MULTIPLIER,
+        normal_hop_cost=NORMAL_HOP_COST, promoted_hop_cost=PROMOTED_HOP_COST,
+        promoted_set=set(promoted_edges))
 
     # --- 2. Decompose the Problem ---
     u_mand, v_mand = mandatory_edge[0], mandatory_edge[1]
@@ -178,41 +199,11 @@ def shortest_path_with_promoted_edges(G: Any, source: Any, target: Any, promoted
     NORMAL_HOP_COST = 100
     PROMOTED_HOP_COST = 33
 
-    # 1. Optimize Lookup: Convert list to set for O(1) checking
-    # We handle both (u,v) and (u,v,key) formats
-    promoted_set = set(promoted_edges)
-
-    # 2. Define the Custom Weight Function
-    def incentivized_weight(u, v, attr):
-        # --- A. Physical Cost ---
-        real_weight = attr.get(weight_attr, 0)
-        if real_weight < 0:
-            raise ValueError("Negative weights not allowed.")
-
-        # --- B. Preference Cost ---
-        # Check if this edge is promoted
-        # (MultiGraph keys are not passed to this function in all NX versions,
-        # but 'attr' usually contains them or we check connectivity)
-
-        is_promoted = False
-
-        # Check 1: Is the specific (u, v) pair in the set?
-        if (u, v) in promoted_set:
-            is_promoted = True
-        # Check 2: If MultiGraph, is the specific key in the set?
-        elif G.is_multigraph():
-            # In some NX versions, 'attr' might not have the key directly if iterated strictly.
-            # But usually we can infer or pass keys.
-            # If your promoted_edges has keys (u, v, k), we need to match carefully.
-            # For simplicity here: if (u, v) is promoted, we treat all parallel lines as promoted
-            # UNLESS you specifically require key matching.
-            pass
-
-            # Apply costs
-        hop_cost = PROMOTED_HOP_COST if is_promoted else NORMAL_HOP_COST
-
-        # Formula: (Weight * HUGE) + Hop_Cost
-        return (real_weight * HUGE_MULTIPLIER) + hop_cost
+    # 1. Weight fn: multigraph-correct, matches promoted (u,v) or (u,v,key).
+    incentivized_weight = _make_incentivized_weight(
+        G, weight_attr, HUGE_MULTIPLIER,
+        normal_hop_cost=NORMAL_HOP_COST, promoted_hop_cost=PROMOTED_HOP_COST,
+        promoted_set=set(promoted_edges))
 
     # 3. Run Dijkstra with the Custom Weight
     try:

@@ -1,38 +1,45 @@
-"""OverFlowGraph: coloured overflow-redispatch graph.
+"""OverFlowGraph: the coloured overflow-redispatch *semantic model*.
 
 Subclasses :class:`PowerFlowGraph`, :class:`NullFlowGraphMixin`, and
 :class:`GraphConsolidationMixin`. The null-flow and consolidation logic live
 in the mixins to keep per-file complexity within A-grade bounds.
+
+Responsibility split
+--------------------
+``OverFlowGraph`` owns the **semantic model** of the overflow: the graph
+topology, per-edge redispatch magnitudes, the *role* of each edge encoded as
+a base colour (``black`` overload / ``blue`` negative / ``coral`` positive /
+``gray`` insignificant), and the boolean semantic flags consumed downstream
+(``is_overload``, ``is_monitored``, ``on_constrained_path``, ``in_red_loop``,
+``is_hub``, ``is_extra_cut``).
+
+Everything that is *purely Graphviz presentation* — penwidth scaling, node
+shapes, tapered swap styling, the compound ``"colour:yellow:colour"``
+highlight strings and the HTML loading labels, and the actual plotting —
+lives in :class:`~alphaDeesp.core.graphs.overflow_renderer.OverflowGraphRenderer`.
+The methods below keep their public signatures and delegate the rendering to
+that stateless renderer, so downstream repositories importing ``OverFlowGraph``
+are unaffected while the two concerns stay cleanly separated.
 """
 
 import logging
-from math import fabs
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 
-from alphaDeesp.core.printer import Printer
 from alphaDeesp.core.graphs.power_flow_graph import PowerFlowGraph
 from alphaDeesp.core.graphs.null_flow_graph import NullFlowGraphMixin
 from alphaDeesp.core.graphs.graph_consolidation import GraphConsolidationMixin
 from alphaDeesp.core.graphs.graph_utils import delete_color_edges
+from alphaDeesp.core.graphs.overflow_renderer import OverflowGraphRenderer
+from alphaDeesp.core.graphs.edge_roles import EDGE_ROLE_POSITIVE, edge_role_of
 
 logger = logging.getLogger(__name__)
 
-# Penwidth thresholds used by build_edges_from_df.
-# The floor is dynamic: at least the width equivalent to 1 MW of flow
-# (``scaling_factor`` applied to 1.0), and at least 10 % of the largest
-# rendered penwidth, so low / zero-flow edges (reconnectable,
-# non-reconnectable, null-flow) remain visible without zooming.
-_TARGET_MAX_PENWIDTH = 15.0
-_MIN_PENWIDTH_FLOW_MW = 1.0
-_MIN_PENWIDTH_FRACTION = 0.10
-
 
 class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph):
-    """A coloured graph of grid overflow redispatch."""
+    """A coloured semantic graph of grid overflow redispatch."""
 
     def __init__(
         self,
@@ -43,13 +50,17 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         float_precision: str = "%.2f",
         extra_lines_to_cut: Optional[Iterable[int]] = None,
     ) -> None:
-        if "line_name" not in df_overflow.columns:
-            df_overflow["line_name"] = [
+        # Work on a copy so the caller's DataFrame is never mutated (this
+        # class adds a ``line_name`` column and ``rename_nodes`` rewrites the
+        # endpoint columns — surprising side effects for an external caller).
+        df = df_overflow.copy()
+        if "line_name" not in df.columns:
+            df["line_name"] = [
                 str(idx_or) + "_" + str(idx_ex) + "_" + str(i)
-                for i, (idx_or, idx_ex) in df_overflow[["idx_or", "idx_ex"]].iterrows()
+                for i, (idx_or, idx_ex) in df[["idx_or", "idx_ex"]].iterrows()
             ]
 
-        self.df = df_overflow
+        self.df = df
         # Subset of ``lines_to_cut`` that the caller wants the cut-analysis
         # to treat like overloads (so they get the same black/constrained
         # styling and feed the structured-overload graph the same way) but
@@ -77,12 +88,8 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
 
     def build_edges_from_df(self, g: nx.MultiDiGraph, lines_to_cut: List[int]) -> None:
         """Add one coloured edge per row of self.df to g."""
-        max_abs_flow = self.df["delta_flows"].abs().max()
-        scaling_factor = _TARGET_MAX_PENWIDTH / max_abs_flow if max_abs_flow > 0 else 1.0
-        min_penwidth = max(
-            _MIN_PENWIDTH_FLOW_MW * scaling_factor,
-            _MIN_PENWIDTH_FRACTION * _TARGET_MAX_PENWIDTH,
-        )
+        scaling_factor, min_penwidth = OverflowGraphRenderer.penwidth_scaling(
+            self.df["delta_flows"])
 
         cols = ("idx_or", "idx_ex", "delta_flows", "gray_edges", "line_name")
         # Operator-selected extras must NOT be coloured black: black is the
@@ -129,7 +136,8 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
     ) -> None:
         """Add a single styled overflow edge to g."""
         fp = self.float_precision
-        penwidth = max(float(fp % (fabs(reported_flow) * scaling_factor)), min_penwidth)
+        penwidth = OverflowGraphRenderer.edge_penwidth(
+            reported_flow, scaling_factor, min_penwidth, fp)
         attrs = {
             "capacity": float(fp % reported_flow),
             "label": fp % reported_flow,
@@ -176,12 +184,13 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         layer toggle stays consistent regardless of which other tagging
         method (``tag_constrained_path`` / ``collapse_red_loops``) has
         already run.
+
+        The node *shape* itself (the Graphviz presentation) is applied by
+        :meth:`OverflowGraphRenderer.set_hub_shapes`; only the semantic flags
+        are owned here.
         """
-        dict_shapes = {node: "oval" for node in self.g.nodes}
         hubs_set = set(hubs)
-        for hub in hubs_set:
-            dict_shapes[hub] = shape_hub
-        nx.set_node_attributes(self.g, dict_shapes, "shape")
+        OverflowGraphRenderer.set_hub_shapes(self.g, hubs_set, shape_hub)
         nx.set_node_attributes(
             self.g, {node: (node in hubs_set) for node in self.g.nodes}, "is_hub"
         )
@@ -195,10 +204,7 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
 
     def highlight_swapped_flows(self, lines_swapped: List[Any]) -> None:
         """Draw lines whose flow direction has swapped in a tapered style."""
-        edge_names = nx.get_edge_attributes(self.g, "name")
-        swapped_edges = [edge for edge, name in edge_names.items() if name in lines_swapped]
-        for attr_name, value in (("style", "tapered"), ("dir", "both"), ("arrowtail", "none")):
-            nx.set_edge_attributes(self.g, {edge: value for edge in swapped_edges}, attr_name)
+        OverflowGraphRenderer.highlight_swapped_flows(self.g, lines_swapped)
 
     def highlight_significant_line_loading(self, dict_line_loading: Dict[Any, Any]) -> None:
         """Augment edge labels with loading rates for monitored lines.
@@ -214,6 +220,9 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
           that are overloaded contingency lines (current colour was
           ``black`` before the highlight). Overloads are therefore a
           subset of low-margin lines, not a disjoint category.
+
+        The semantic flags are owned here; the label / compound-colour
+        *formatting* is delegated to :class:`OverflowGraphRenderer`.
         """
         edge_names = nx.get_edge_attributes(self.g, "name")
         edge_colors = nx.get_edge_attributes(self.g, "color")
@@ -224,6 +233,7 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
 
         is_overload_attrs: Dict[Any, bool] = {}
         is_monitored_attrs: Dict[Any, bool] = {}
+        base_color_attrs: Dict[Any, Any] = {}
 
         for edge, edge_name in edge_names.items():
             if edge_name not in dict_line_loading:
@@ -243,22 +253,32 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
             if not is_extra:
                 is_monitored_attrs[edge] = True
                 if current_edge_color == "black":
-                    edge_x_labels[edge] = f'< {current_x_label} <BR/>  <B>{before}%</B>  → {after}%>'
+                    edge_x_labels[edge] = OverflowGraphRenderer.overload_label(
+                        current_x_label, before, after)
                     is_overload_attrs[edge] = True
                 else:
-                    edge_x_labels[edge] = f'< {current_x_label} <BR/>  {before}% → <B>{after}%</B> >'
-                edge_colors[edge] = f'"{current_edge_color}:yellow:{current_edge_color}"'
+                    edge_x_labels[edge] = OverflowGraphRenderer.low_margin_label(
+                        current_x_label, before, after)
+                # Wrapping the base colour into a compound "c:yellow:c" string is
+                # a *rendering* step; record the untouched base colour so the
+                # model stays authoritative and ``edge_role_of`` never has to
+                # parse the compound (see :mod:`alphaDeesp.core.graphs.edge_roles`).
+                base_color_attrs[edge] = current_edge_color
+                edge_colors[edge] = OverflowGraphRenderer.highlight_color(current_edge_color)
             else:
                 # Extras keep their natural flow colour; only the
-                # ``before → 0%`` annotation surfaces the cut so the
+                # ``before → after`` annotation surfaces the cut so the
                 # operator sees how their choice materialises.
-                edge_x_labels[edge] = f'< {current_x_label} <BR/>  {before}% → <B>{after}%</B> >'
+                edge_x_labels[edge] = OverflowGraphRenderer.low_margin_label(
+                    current_x_label, before, after)
 
             label_font_color[edge] = color_label_highlight
 
         nx.set_edge_attributes(self.g, edge_x_labels, "label")
         nx.set_edge_attributes(self.g, label_font_color, "fontcolor")
         nx.set_edge_attributes(self.g, edge_colors, "color")
+        if base_color_attrs:
+            nx.set_edge_attributes(self.g, base_color_attrs, "base_color")
         if is_overload_attrs:
             nx.set_edge_attributes(self.g, is_overload_attrs, "is_overload")
         if is_monitored_attrs:
@@ -274,26 +294,39 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         save_folder: str = "",
         without_gray_edges: bool = False,
     ) -> Any:
-        printer = Printer(save_folder)
-        g = self.g
+        """Render the graph via :class:`OverflowGraphRenderer`."""
+        return OverflowGraphRenderer.plot(
+            self.g, layout,
+            rescale_factor=rescale_factor,
+            allow_overlap=allow_overlap,
+            fontsize=fontsize,
+            node_thickness=node_thickness,
+            save_folder=save_folder,
+            without_gray_edges=without_gray_edges,
+        )
 
-        if without_gray_edges:
-            layout_dict = {n: c for n, c in zip(g.nodes, layout)} if layout is not None else None
-            g = delete_color_edges(g, "gray")
-            if layout_dict is not None:
-                layout = [layout_dict[node] for node in g.nodes]
+    def edge_role(self, name: Any) -> Optional[str]:
+        """Return the semantic role of the first edge carrying line ``name``.
 
-        kwargs = dict(rescale_factor=rescale_factor, fontsize=fontsize,
-                      node_thickness=node_thickness, name="g_overflow_print")
-        if save_folder == "":
-            return printer.plot_graphviz(g, layout, allow_overlap=allow_overlap, **kwargs)
-        printer.display_geo(g, layout, **kwargs)
+        Reads the authoritative base colour (see
+        :func:`~alphaDeesp.core.graphs.edge_roles.edge_role_of`) so callers
+        never parse the rendered — possibly compound ``"c:yellow:c"`` — ``color``
+        string. Returns one of the ``EDGE_ROLE_*`` constants, or ``None`` when no
+        edge carries that name.
+
+        A physical line may appear as two directed edges (e.g. a ``blue`` and a
+        ``coral`` direction); this returns the first match. When the direction
+        matters, iterate edges and call ``edge_role_of`` per edge instead.
+        """
+        for _, _, data in self.g.edges(data=True):
+            if data.get("name") == name:
+                return edge_role_of(data)
         return None
 
     def rename_nodes(self, mapping: Dict[Any, Any]) -> None:
         self.g = nx.relabel_nodes(self.g, mapping, copy=True)
         self.df["idx_or"] = [mapping[idx_or] for idx_or in self.df["idx_or"]]
-        self.df["idx_ex"] = [mapping[idx_or] for idx_or in self.df["idx_ex"]]
+        self.df["idx_ex"] = [mapping[idx_ex] for idx_ex in self.df["idx_ex"]]
 
     def collapse_red_loops(self) -> None:
         """Collapse purely-coral, non-hub nodes to point shapes.
@@ -303,24 +336,9 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         no longer derived from this collapse — it is set explicitly by
         :meth:`tag_red_loops` from the recommender's
         ``get_dispatch_edges_nodes(only_loop_paths=True)`` source-of-
-        truth list.
+        truth list. The collapse itself is delegated to the renderer.
         """
-        shapes = nx.get_node_attributes(self.g, "shape")
-        peripheries = nx.get_node_attributes(self.g, "peripheries")
-        edge_colors = nx.get_edge_attributes(self.g, "color")
-        edge_styles = nx.get_edge_attributes(self.g, "style")
-
-        nodes_to_collapse = {}
-        for node in self.g.nodes:
-            if shapes.get(node) != "oval":
-                continue
-            if node in peripheries and peripheries[node] >= 2:
-                continue
-            all_edges = list(self.g.in_edges(node, keys=True)) + list(self.g.out_edges(node, keys=True))
-            if all_edges and self._all_edges_coral_no_dash(all_edges, edge_colors, edge_styles):
-                nodes_to_collapse[node] = "point"
-
-        nx.set_node_attributes(self.g, nodes_to_collapse, "shape")
+        OverflowGraphRenderer.collapse_red_loops(self.g)
 
     def tag_red_loops(
         self,
@@ -381,22 +399,20 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         is on the constrained path; including the coral counterpart
         would surface positive-overflow edges in the layer toggle and
         confuse the operator.
+
+        The coral test reads the edge's semantic *role* via
+        :func:`~alphaDeesp.core.graphs.edge_roles.edge_role_of` (which prefers
+        the authoritative ``base_color`` and is compound-colour safe) rather
+        than parsing the rendered ``color`` string here.
         """
         if lines_constrained_path:
             wanted = set(lines_constrained_path)
             edge_names = nx.get_edge_attributes(self.g, "name")
-            edge_colors = nx.get_edge_attributes(self.g, "color")
             edge_attrs: Dict[Any, bool] = {}
             for edge, name in edge_names.items():
                 if name not in wanted:
                     continue
-                color = edge_colors.get(edge, "")
-                base_color = (
-                    color.split(":", 1)[0].strip().strip('"').lower()
-                    if isinstance(color, str)
-                    else ""
-                )
-                if base_color == "coral":
+                if edge_role_of(self.g.edges[edge]) == EDGE_ROLE_POSITIVE:
                     continue
                 edge_attrs[edge] = True
             if edge_attrs:
@@ -415,10 +431,11 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         edge_colors: Dict[Any, str],
         edge_styles: Dict[Any, str],
     ) -> bool:
-        """Return True when all edges are coral and none are dashed/dotted."""
-        for edge in all_edges:
-            if edge_colors.get(edge) != "coral":
-                return False
-            if edge_styles.get(edge, "") in ("dashed", "dotted"):
-                return False
-        return True
+        """Return True when all edges are coral and none are dashed/dotted.
+
+        Retained for backwards compatibility (tests and external callers
+        reference ``OverFlowGraph._all_edges_coral_no_dash``); the
+        implementation lives on :class:`OverflowGraphRenderer`.
+        """
+        return OverflowGraphRenderer._all_edges_coral_no_dash(
+            all_edges, edge_colors, edge_styles)

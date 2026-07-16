@@ -34,7 +34,17 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         simulator_data: Optional[Dict[str, Any]] = None,
         substation_in_cooldown: Optional[List[int]] = None,
         debug: bool = False,
+        auto_run: bool = True,
     ) -> None:
+        """Build the solver state and (by default) run the ranking pipeline.
+
+        :param auto_run: when ``True`` (default, backwards-compatible) the full
+            ranking pipeline runs in the constructor. Pass ``False`` to build the
+            object without side effects and call :meth:`run` explicitly — useful
+            for testing, staged execution, or introspecting intermediate state.
+            :class:`AlphaDeesp_warmStart` is the pre-existing "skip the pipeline"
+            path and is now expressible as ``auto_run=False``.
+        """
         self.bag_of_graphs: Dict[str, Any] = {}
         self.debug = debug
         self.boolean_dump_data_to_file = False
@@ -47,6 +57,24 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         self.initial_graph = self.g.copy()
         self.substation_in_cooldown = substation_in_cooldown if substation_in_cooldown is not None else []
 
+        # Pipeline results — populated by run(); initialised empty so the object
+        # is well-formed (no AttributeError) even when auto_run is False.
+        self.g_distribution_graph: Any = None
+        self.rankedLoopBuses: Dict[Any, float] = {}
+        self.structured_topological_actions: Dict[int, Any] = {}
+        self.ranked_combinations: List[pd.DataFrame] = []
+
+        if auto_run:
+            self.run()
+
+    def run(self) -> "AlphaDeesp":
+        """Execute the full ranking pipeline and cache the results on ``self``.
+
+        Idempotent-by-recompute: builds the structured distribution graph, ranks
+        red loops and loop buses, identifies routing buses and scores the
+        candidate topologies. Returns ``self`` so callers can chain
+        ``AlphaDeesp(..., auto_run=False).run().get_ranked_combinations()``.
+        """
         self.g_distribution_graph = Structured_Overload_Distribution_Graph(self.g)
 
         self.rank_red_loops()
@@ -57,6 +85,8 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
 
         if self.boolean_dump_data_to_file:
             self.ranked_combinations[0].to_csv("./result_ranked_combinations.csv", index=True)
+
+        return self
 
     def get_ranked_combinations(self) -> List[pd.DataFrame]:
         return self.ranked_combinations
@@ -162,19 +192,23 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         return pd.DataFrame(columns=["score", "topology", "node"], data=scores_data)
 
     def sort_hubs(self, hubs: Optional[List[Any]]) -> Optional[pd.DataFrame]:
-        """Sort hubs by largest absolute incident delta-flow; None if no hubs."""
+        """Sort hubs by largest absolute incident delta-flow; None if no hubs.
+
+        Vectorised: the total absolute delta-flow entering (``idx_ex``) and
+        leaving (``idx_or``) every node is computed once with two group-sums
+        instead of re-scanning the whole DataFrame for each hub.
+        """
         if not hubs:
             return None
 
-        flows = []
-        for node in hubs:
-            ingoing, outgoing = [], []
-            for _, row in self.df.iterrows():
-                if row["idx_or"] == node:
-                    outgoing.append(abs(row["delta_flows"]))
-                if row["idx_ex"] == node:
-                    ingoing.append(abs(row["delta_flows"]))
-            flows.append(max(sum(ingoing), sum(outgoing)))
+        abs_delta = self.df["delta_flows"].abs()
+        out_sum = abs_delta.groupby(self.df["idx_or"]).sum()
+        in_sum = abs_delta.groupby(self.df["idx_ex"]).sum()
+
+        flows = [
+            max(float(out_sum.get(node, 0.0)), float(in_sum.get(node, 0.0)))
+            for node in hubs
+        ]
 
         df = pd.DataFrame({"hubs": hubs, "max_flows": flows})
         df.sort_values("max_flows", ascending=False, inplace=True)
@@ -200,9 +234,15 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
     def rank_loop_buses(
         self, graph: nx.MultiDiGraph, df_initial_flows: pd.DataFrame
     ) -> Dict[Any, float]:
-        """Score each intermediate bus of every red loop by (non_red_inflow + local_production) * red_inflow_delta."""
+        """Score each intermediate bus of every red loop by (non_red_inflow + local_production) * red_inflow_delta.
+
+        The per-``(source, target)`` initial-inflow lookup is built once from
+        ``df_initial_flows`` instead of re-scanning the flow arrays for every
+        non-red inflow edge of every candidate bus (was O(buses x edges x rows)).
+        """
         color_attrs = nx.get_edge_attributes(graph, "color")
         label_attrs = nx.get_edge_attributes(graph, "label")
+        inflow_lookup = self._build_inflow_lookup(df_initial_flows)
 
         strength_by_bus: Dict[Any, float] = {}
         red_loops = self.g_distribution_graph.get_loops()
@@ -211,7 +251,8 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
                 if bus == loop.Source or bus == loop.Target:
                     continue
                 strength_by_bus[bus] = self._bus_loop_strength(
-                    bus, df_initial_flows, color_attrs, label_attrs)
+                    bus, df_initial_flows, color_attrs, label_attrs,
+                    inflow_lookup=inflow_lookup)
         return strength_by_bus
 
     def _bus_loop_strength(
@@ -220,8 +261,14 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         df_initial_flows: pd.DataFrame,
         color_attrs: Dict[Any, Any],
         label_attrs: Dict[Any, Any],
+        inflow_lookup: Optional[Dict[Any, float]] = None,
     ) -> float:
-        """Compute the red-loop strength measure for a single intermediate bus."""
+        """Compute the red-loop strength measure for a single intermediate bus.
+
+        When *inflow_lookup* is supplied (see :meth:`_build_inflow_lookup`) the
+        non-red initial inflow is read in O(1); otherwise it falls back to the
+        linear :meth:`_initial_inflow_between` scan (kept for direct callers).
+        """
         red_delta_in = 0.0
         non_red_in = 0.0
         for edge in self.g.in_edges(bus, keys=True):
@@ -229,9 +276,35 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
                 red_delta_in += float(label_attrs[edge])
             else:
                 other = edge[0] if edge[0] != bus else edge[1]
-                non_red_in += self._initial_inflow_between(df_initial_flows, other, bus)
+                if inflow_lookup is not None:
+                    non_red_in += inflow_lookup.get((other, bus), 0.0)
+                else:
+                    non_red_in += self._initial_inflow_between(df_initial_flows, other, bus)
         total_in = non_red_in + self._local_production_at_bus(bus)
         return total_in * red_delta_in
+
+    @staticmethod
+    def _build_inflow_lookup(df_initial_flows: pd.DataFrame) -> Dict[Any, float]:
+        """Precompute ``(source, target) -> |init_flow|`` once for the whole grid.
+
+        Mirrors the first-match, sign-aware orientation logic of
+        :meth:`_initial_inflow_between`: a row carries power from ``idx_or`` to
+        ``idx_ex`` when ``init_flow >= 0`` and the reverse when ``init_flow <=
+        0`` (a zero-flow row registers both orientations at ``0``). The first
+        row (in DataFrame order) producing a given key wins, matching the
+        original linear-scan semantics exactly.
+        """
+        lookup: Dict[Any, float] = {}
+        or_arr = df_initial_flows["idx_or"].to_numpy()
+        ex_arr = df_initial_flows["idx_ex"].to_numpy()
+        fl_arr = df_initial_flows["init_flows"].to_numpy()
+        for o, e, f in zip(or_arr, ex_arr, fl_arr):
+            abs_f = float(np.abs(f))
+            if f >= 0:
+                lookup.setdefault((o, e), abs_f)
+            if f <= 0:
+                lookup.setdefault((e, o), abs_f)
+        return lookup
 
     def _local_production_at_bus(self, bus: Any) -> float:
         """Sum production values attached to *bus* (0 if none)."""
@@ -279,10 +352,15 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         red_loops["min_cut_edges"] = cut_sets
 
     def to_DiGraph(self, gM: nx.MultiDiGraph) -> nx.DiGraph:
-        """Flatten a MultiDiGraph to a DiGraph by summing parallel edge capacities."""
+        """Flatten a MultiDiGraph to a DiGraph by summing parallel edge capacities.
+
+        A genuinely missing ``capacity`` contributes ``0.0`` (a neutral edge in
+        the min-cut used by :meth:`rank_red_loops`), not a spurious unit weight
+        that would skew the cut.
+        """
         G = nx.DiGraph()
         for u, v, _, data in gM.edges(data=True, keys=True):
-            w = data.get("capacity", 1.0)
+            w = data.get("capacity", 0.0)
             if G.has_edge(u, v):
                 G[u][v]["capacity"] += w
             else:
@@ -305,7 +383,13 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
 
 
 class AlphaDeesp_warmStart(AlphaDeesp):
-    """Skip the expensive pipeline; caller supplies a pre-built distribution graph."""
+    """Skip the expensive pipeline; caller supplies a pre-built distribution graph.
+
+    Equivalent in spirit to ``AlphaDeesp(..., auto_run=False)`` with the
+    distribution graph injected, but kept as a distinct class (external code —
+    e.g. the recommender — imports it directly) and deliberately avoids the base
+    constructor's ``initial_graph = g.copy()`` so warm starts stay cheap.
+    """
 
     def __init__(
         self,
@@ -320,3 +404,8 @@ class AlphaDeesp_warmStart(AlphaDeesp):
         self.g = g
         self.g_distribution_graph = g_distribution_graph
         self.simulator_data = simulator_data
+        # Well-formedness: the pipeline hasn't run, but the result attributes
+        # exist (empty) so accessing them never raises AttributeError.
+        self.rankedLoopBuses: Dict[Any, float] = {}
+        self.structured_topological_actions: Dict[int, Any] = {}
+        self.ranked_combinations: List[pd.DataFrame] = []

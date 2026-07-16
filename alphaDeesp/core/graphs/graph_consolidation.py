@@ -24,6 +24,15 @@ from alphaDeesp.core.graphs.structured_overload_graph import (
 
 logger = logging.getLogger(__name__)
 
+# Optional bound on the number of *edges* in a simple path enumerated during
+# consolidation (networkx ``cutoff`` counts edges, unlike rustworkx which
+# counts nodes). Enumerating all simple paths is combinatorial and can hang on
+# large grids. Like the loop-path cutoff this is **OFF by default** (``None``
+# == unbounded == original behaviour) so it can never silently prune a
+# legitimate consolidation path; pass an int to opt into a bound on grids
+# where enumeration is a problem.
+DEFAULT_CONSOLIDATION_PATH_CUTOFF = None
+
 
 class GraphConsolidationMixin:
     """Graph consolidation and flow-direction helpers; mixed into OverFlowGraph."""
@@ -52,10 +61,11 @@ class GraphConsolidationMixin:
             self._recolor_ambiguous_as_blue(g_c, sources)
 
     def _recolor_ambiguous_as_blue(
-        self, g_c: nx.MultiDiGraph, sources: Iterable[Any]
+        self, g_c: nx.MultiDiGraph, sources: Iterable[Any],
+        cutoff: Optional[int] = DEFAULT_CONSOLIDATION_PATH_CUTOFF,
     ) -> None:
         """Recolour non-{blue, black} edges on cycles within g_c to blue on self.g."""
-        paths = list(all_simple_edge_paths_multi(g_c, sources, sources))
+        paths = list(all_simple_edge_paths_multi(g_c, sources, sources, cutoff=cutoff))
         if not paths:
             return
         colors = nx.get_edge_attributes(g_c, 'color')
@@ -118,6 +128,7 @@ class GraphConsolidationMixin:
         hub_sources: Iterable[Any],
         hub_targets: Iterable[Any],
         ignore_null_edges: bool = True,
+        cutoff: Optional[int] = DEFAULT_CONSOLIDATION_PATH_CUTOFF,
     ) -> None:
         """Recolour gray edges on loop paths between hubs to coral."""
         all_edges_to_recolor = []
@@ -129,7 +140,7 @@ class GraphConsolidationMixin:
                 [e for e, cap in init_capacity.items() if cap == 0.])
 
         for source, target in zip(hub_sources, hub_targets):
-            for path in nx.all_simple_edge_paths(g_without_blue, source, target):
+            for path in nx.all_simple_edge_paths(g_without_blue, source, target, cutoff=cutoff):
                 all_edges_to_recolor += path
 
         all_edges_to_recolor = set(all_edges_to_recolor)

@@ -3,6 +3,7 @@ loop paths and hubs from a raw overflow graph.
 """
 
 import logging
+from functools import cached_property
 from typing import Any, List, Optional, Tuple
 
 import networkx as nx
@@ -18,12 +19,27 @@ from alphaDeesp.core.graphs.null_flow import (
 
 logger = logging.getLogger(__name__)
 
+# Optional bound on the number of *nodes* in a loop path enumerated by
+# :meth:`find_loops` (rustworkx ``cutoff`` counts nodes). Enumerating all
+# simple paths between every pair of candidate hubs is combinatorial and can
+# hang on very large grids. The bound is **OFF by default** (``None`` ==
+# unbounded == the original behaviour): a too-small cutoff silently drops
+# legitimate long loops — real RTE zone grids have loop paths well beyond 10
+# nodes, and an emptied ``find_loops`` then breaks downstream consumers. Pass
+# an int to opt into a bound only on grids where enumeration is a problem.
+DEFAULT_LOOP_PATH_CUTOFF = None
+
 
 class Structured_Overload_Distribution_Graph:
     """
     Staring from a raw overload distribution graph with color edges, this class identifies the underlying path structure in terms of constrained path, loop paths and hub nodes
     """
-    def __init__(self, g: nx.MultiDiGraph, possible_hubs: Optional[List[Any]] = None) -> None:
+    def __init__(
+        self,
+        g: nx.MultiDiGraph,
+        possible_hubs: Optional[List[Any]] = None,
+        loop_path_cutoff: Optional[int] = DEFAULT_LOOP_PATH_CUTOFF,
+    ) -> None:
         """
         Parameters
         ----------
@@ -31,25 +47,99 @@ class Structured_Overload_Distribution_Graph:
         g: :class:`nx:MultiDiGraph`
             a raw graph from OverflowGraph
 
+        possible_hubs: list, optional
+            a pre-computed subset of hub candidates (e.g. when consolidating a
+            previously built overflow graph)
+
+        loop_path_cutoff: int, optional
+            optional maximum number of *nodes* in a loop path enumerated by
+            :meth:`find_loops`. Defaults to :data:`DEFAULT_LOOP_PATH_CUTOFF`
+            (``None`` == unbounded == the original behaviour). Pass an int only
+            to bound enumeration on grids where it would otherwise hang; too
+            small a value silently drops legitimate long loops.
+
         """
-        self.g_init=g
-        self.g_without_pos_edges = delete_color_edges(self.g_init, "coral") #graph without loop path that have positive/red-coloured weight edges
-        self.g_only_blue_components = delete_color_edges(self.g_without_pos_edges, "gray")
-        self.g_only_blue_components = delete_color_edges(self.g_only_blue_components, "dimgray")#also delete those edges of non reconnectable lines that we would want to visualize but is not an operational path in the structured path
+        self.g_init = g
+        self.loop_path_cutoff = loop_path_cutoff
+        # Snapshot the graph at construction. The colour-filtered views are lazy
+        # (below) but MUST reflect the graph *as it was when this object was
+        # built* — the historical eager ``__init__`` copied every view at
+        # construction, so a later mutation of the caller's graph (e.g.
+        # ``consolidate_graph`` removing the ignored lines from the shared
+        # ``OverFlowGraph.g`` before it re-reads this object) did not leak into
+        # the views. Deferring the copies to first access would read the mutated
+        # graph instead; freezing a single snapshot here preserves the exact
+        # snapshot semantics while keeping the views lazy. ``g_init`` itself stays
+        # a live reference — ``get_constrained_edges_nodes`` reads names off it and
+        # historically saw the live graph, so that alias is deliberately kept.
+        self._g_snapshot = g.copy()
+        # Caller-supplied hub seeds influence *loop enumeration* only (see the
+        # ``red_loops`` property); the *detected* hubs are exposed via ``hubs`` /
+        # ``get_hubs``. Historically this seed was stored in ``self.hubs`` until
+        # ``find_hubs`` overwrote it — capturing it separately makes the lazy
+        # properties order-independent while preserving that exact behaviour.
+        self._possible_hubs = list(possible_hubs) if possible_hubs is not None else []
+        self.type = ""
 
-        self.g_without_constrained_edge = delete_color_edges(self.g_init, "black")
-        self.g_without_gray_and_c_edge = delete_color_edges(self.g_without_constrained_edge, "gray")
-        self.g_without_gray_and_c_edge = delete_color_edges(self.g_without_gray_and_c_edge, "dimgray")
-        self.g_only_red_components = delete_color_edges(self.g_without_gray_and_c_edge, "blue")#graph with only loop path that have positive/red-coloured weight edges
+        # The colour-filtered views, red loops and hubs are lazy *cached
+        # properties* (computed once on first access, then memoised): a consumer
+        # that needs only a subset — or that never consolidates — does not pay
+        # for the rest, and the consolidation loop's repeated rebuilds compute
+        # only what each iteration touches. The constrained path is validated
+        # eagerly: it is cheap and preserves the construction-time "is this a
+        # valid overflow graph" check that callers relied on.
+        self.constrained_path = self.find_constrained_path()
 
-        self.constrained_path= self.find_constrained_path() #constrained path that contains the constrained edges and their connected component of blue edges
-        self.type=""#
-        if possible_hubs is not None:#in case we already have a subset of candidates, for instance when we already built a first Overload graph and are consolidating it
-            self.hubs=possible_hubs
-        else:
-            self.hubs=[]
-        self.red_loops = self.find_loops() #parallel path to the constrained path on which flow can be rerouted
-        self.hubs = self.find_hubs() #specific nodes at substations connecting loop paths to constrained path. This is where flow can be most easily rerouted
+    # ------------------------------------------------------------------
+    # Lazy colour-filtered views (pure functions of the construction-time
+    # snapshot; cached). Each removes the *union* of the listed colours in a
+    # single graph copy.
+    # ------------------------------------------------------------------
+
+    @cached_property
+    def g_without_pos_edges(self) -> nx.MultiDiGraph:
+        """Overflow graph without coral (positive / loop) edges."""
+        return delete_color_edges(self._g_snapshot, "coral")
+
+    @cached_property
+    def g_only_blue_components(self) -> nx.MultiDiGraph:
+        """Only the blue constrained-path components (drops coral / gray / dimgray).
+
+        ``dimgray`` (non-reconnectable null-flow lines that we still visualise)
+        is removed too: they are not an operational path in the structured path.
+        """
+        return delete_color_edges(self._g_snapshot, ("coral", "gray", "dimgray"))
+
+    @cached_property
+    def g_without_constrained_edge(self) -> nx.MultiDiGraph:
+        """Overflow graph without the black (overloaded) edges."""
+        return delete_color_edges(self._g_snapshot, "black")
+
+    @cached_property
+    def g_without_gray_and_c_edge(self) -> nx.MultiDiGraph:
+        """Only the coloured redispatch edges (drops black / gray / dimgray)."""
+        return delete_color_edges(self._g_snapshot, ("black", "gray", "dimgray"))
+
+    @cached_property
+    def g_only_red_components(self) -> nx.MultiDiGraph:
+        """Only the coral (positive / loop) redispatch edges."""
+        return delete_color_edges(self._g_snapshot, ("black", "gray", "dimgray", "blue"))
+
+    @cached_property
+    def red_loops(self) -> pd.DataFrame:
+        """Parallel (loop) paths, enumerated with the caller-supplied seed hubs.
+
+        Mirrors the historical eager ``self.red_loops = find_loops()`` which ran
+        *before* hub detection — so it uses ``_possible_hubs`` (the seed), not the
+        detected ``hubs``. The public :meth:`find_loops` re-enumerates with the
+        detected hubs when called after construction (as consolidation does).
+        """
+        return self._find_loops(self._possible_hubs)
+
+    @cached_property
+    def hubs(self) -> List[Any]:
+        """Detected hub nodes (memoised)."""
+        return self.find_hubs()
 
     def get_amont_blue_edges(self, g: nx.MultiDiGraph, node: Any) -> List[Any]:
         """
@@ -119,11 +209,9 @@ class Structured_Overload_Distribution_Graph:
         g = self.g_without_constrained_edge
         hubs = []
 
-        if self.constrained_path is not None:
-            logger.debug("In get_hubs(): constrained_path = %s", self.constrained_path)
-        else:
-            e_amont, constrained_edge, e_aval = self.get_constrained_path()
-            self.constrained_path = ConstrainedPath(e_amont, constrained_edge, e_aval)
+        # ``constrained_path`` is validated eagerly in ``__init__``, so it is
+        # always available here.
+        logger.debug("In find_hubs(): constrained_path = %s", self.constrained_path)
 
         # for nodes in aval, if node has RED inputs (ie incoming flows) then it is a hub
         for node in self.constrained_path.n_aval():
@@ -148,6 +236,15 @@ class Structured_Overload_Distribution_Graph:
         return self.hubs
 
     def find_loops(self) -> pd.DataFrame:
+        """Enumerate loop paths using the *currently detected* hubs (``self.hubs``).
+
+        The cached :attr:`red_loops` uses the caller-supplied seed hubs instead
+        (see its docstring); consolidation re-enumerates through this method
+        after the hubs have been detected.
+        """
+        return self._find_loops(self.hubs)
+
+    def _find_loops(self, hubs: List[Any]) -> pd.DataFrame:
 
         """This function returns all parallel paths. After discussing with Antoine, start with the most "en Aval" node,
         and walk in reverse for loops and parallel path returns a dict with all data
@@ -167,8 +264,8 @@ class Structured_Overload_Distribution_Graph:
         # print("==================== In function get_loops ====================")
         g = self.g_only_red_components
         c_path_n = self.constrained_path.full_n_constrained_path()
-        if len(self.hubs)!=0:#already some insights of possible hubs
-            c_path_n=self.hubs
+        if len(hubs)!=0:#already some insights of possible hubs
+            c_path_n=hubs
 
         # --- 1. PRE-PROCESSING (Rustworkx) ---
         # Convert NetworkX graph to Rustworkx for 50x speedup
@@ -192,9 +289,12 @@ class Structured_Overload_Distribution_Graph:
                     s_idx = node_map[src_name]
                     t_idx = node_map[tgt_name]
 
-                    # Rustworkx: Find all simple paths (FAST)
-                    # cutoff=10 is crucial to prevent hanging on large grids
-                    paths_indices = rx.all_simple_paths(rx_graph, s_idx, t_idx, min_depth=1)#, cutoff=10)
+                    # Rustworkx: Find all simple paths (FAST).
+                    # ``cutoff`` (max nodes per path) is crucial to prevent
+                    # hanging on large grids; see ``loop_path_cutoff``. rustworkx
+                    # treats ``cutoff=None`` as "no bound".
+                    paths_indices = rx.all_simple_paths(
+                        rx_graph, s_idx, t_idx, min_depth=1, cutoff=self.loop_path_cutoff)
 
                     # Convert Indices -> Names
                     # We extend the main list directly
@@ -232,12 +332,11 @@ class Structured_Overload_Distribution_Graph:
         return self.red_loops
 
     def find_constrained_path(self) -> "ConstrainedPath":
-        """Find and return the constrained path
+        """Find and return the constrained path.
 
-         Returns
-        ----------
-
-        res: :class:`ConstrainedPath`
+        Returns
+        -------
+        ConstrainedPath
             a constrained path object
         """
         constrained_edge = None
@@ -254,16 +353,14 @@ class Structured_Overload_Distribution_Graph:
         return self.constrained_path
 
     def get_constrained_edges_nodes(self) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
-        """
-        This function identifies the constrained path within the distribution graph.
+        """Identify the constrained path within the distribution graph.
 
-        Parameters:
-        g_distribution_graph (Structured_Overload_Distribution_Graph): The structured overload distribution graph.
-
-        Returns:
-        tuple: A tuple containing two lists:
-               - edges_constrained_path: List of edges that are part of the constrained path.
-               - nodes_constrained_path: List of nodes that are part of the constrained path.
+        Returns
+        -------
+        tuple
+            ``(edges_constrained_path, nodes_constrained_path, other_blue_edges,
+            other_blue_nodes)`` — the line names and nodes on the constrained
+            path, plus the blue edges/nodes that are *not* on it.
         """
         constrained_path_object = self.constrained_path#self.find_constrained_path()
         nodes_constrained_path = constrained_path_object.full_n_constrained_path()
@@ -291,23 +388,32 @@ class Structured_Overload_Distribution_Graph:
         return list(set(edges_constrained_path)), nodes_constrained_path, other_blue_edges, other_blue_nodes
 
     def get_dispatch_edges_nodes(self, only_loop_paths: bool = True) -> Tuple[List[Any], List[Any]]:
-        """
-        This function identifies the dispatch path within the distribution graph.
+        """Identify the dispatch (loop) path within the distribution graph.
 
-        Parameters:
-        g_distribution_graph (Structured_Overload_Distribution_Graph): The structured overload distribution graph.
+        Parameters
+        ----------
+        only_loop_paths : bool
+            when True (default) restrict to nodes that lie on a detected red-loop
+            path; otherwise use every node of the red-component graph.
 
-        Returns:
-        tuple: A tuple containing two lists:
-               - lines_redispatch: List of lines that are part of the dispatch path.
-               - list_nodes_dispatch_path: List of nodes that are part of the dispatch path.
+        Returns
+        -------
+        tuple
+            ``(lines_redispatch, list_nodes_dispatch_path)`` — the line names and
+            nodes that make up the dispatch path.
         """
         lines_redispatch=[]
         list_nodes_dispatch_path=[]
         g_red = self.g_only_red_components
 
         if only_loop_paths:
-            list_nodes_dispatch_path = list(set(self.red_loops.Path.sum()))#list(set(self.find_loops()["Path"].sum()))
+            # ``Series.sum()`` on an empty ``Path`` column returns the scalar
+            # 0 (not an empty list), so guard the no-loop case explicitly to
+            # avoid ``set(0)`` -> "int object is not iterable". ``sum(paths,
+            # [])`` concatenates the per-loop node lists and yields [] when
+            # there are no loops.
+            paths = self.red_loops.Path
+            list_nodes_dispatch_path = list(set(sum(paths, []))) if len(paths) else []
         else:
             list_nodes_dispatch_path=list(g_red.nodes)
 
