@@ -238,3 +238,62 @@ this pass via a 5-lens cross-repo analysis, independently spot-checked.
 is released *and* its pin is bumped. When that happens it works unchanged; it
 may optionally drop the antenna-mode skip workaround in `_orchestrator.py`
 since the underlying raise is fixed, but this is not required.
+
+---
+
+## Pistes de travail restantes (remaining work)
+
+Consolidated backlog of what this pass did **not** address, ranked roughly by
+leverage. Nothing below is required for the shipped changes to be correct — they
+are the next increments.
+
+### Correctness follow-ups (open findings)
+- **#4 — `create_df` positional indexing** (`core/simulation.py`). `df["delta_flows"].abs()[line_to_cut[0]]`
+  indexes a Series *by label* assuming a contiguous `RangeIndex` aligned to line
+  ids; key on the line id explicitly. Also several `iterrows` passes to vectorise.
+  *Needs grid2op to exercise.*
+- **#6 — `shortest_paths.py`** dead `elif G.is_multigraph(): pass` branch and
+  incomplete MultiDiGraph promoted-edge matching (the "prefer promoted edges"
+  heuristic silently degrades on multigraphs).
+- **#7 — `to_DiGraph`** defaults a missing `capacity` to `1.0`, skewing
+  `rank_red_loops`; prefer `0.0` or assert presence.
+
+### Maintainability (highest leverage first)
+- **Repoint CI static analysis at the `graphs/` package** (review rec. #2, skipped
+  by request). `.circleci/config.yml` runs pyflakes/mypy on the 49-line
+  `graphsAndPaths.py` shim, never on `overflow_graph.py` / `null_flow_graph.py` /
+  etc. — so the cross-repo module has no static gate.
+- **Mixins → composition or `typing.Protocol`.** `NullFlowGraphMixin`,
+  `GraphConsolidationMixin`, `TopologyScorerMixin`, `TopoApplicatorMixin` assume
+  `self.g` / `self.float_precision` with no enforced contract.
+- **`interactive_html.py` (~976 LOC)** — decompose like the graph layer; externalise
+  the embedded JS/CSS to lintable asset files. It is part of the cross-repo surface.
+- **`Grid2opSimulation.py` (~814 LOC)** monolith — split by concern.
+- **Logging vs `print`** — route the ~40 remaining `print()` calls in the older
+  backends (`grid2op/`, `pypownet/`, `network.py`, `printer.py`) through `logging`.
+
+### Deeper revisions
+- **Finish inverting model vs colour strings.** `tag_constrained_path` still
+  parses `"coral:yellow:coral"`; make the semantic model authoritative and derive
+  all colours from it (never the reverse). Consider an `edge_role(name)` accessor
+  so no downstream repo ever parses a colour again.
+- **`AlphaDeesp.__init__` side effects → explicit `run()`.** Ranking runs in the
+  constructor; `AlphaDeesp_warmStart` exists only to skip it.
+- **`Structured_Overload_Distribution_Graph`** eager construction + the consolidation
+  loop rebuilding the whole object each iteration — cache colour-subgraph views.
+
+### Interface / naming (backward-compatible only)
+- PEP8 forwarding aliases + a deprecation clock for the `camelCase`
+  (`isAntenna`, …) and `Structured_Overload_Distribution_Graph` names.
+- Accept both spellings of the misspelled config key `ThersholdMinPowerOfLoop`.
+- A short `amont`/`aval` (upstream/downstream) glossary in the docs.
+
+### Validation & release
+- **Run the grid2op integration suites in CI** (`alphadeesp_test.py`,
+  `test_expert_op.py`, `test_expert_rules.py`, `grid2op/`) — not runnable in this
+  sandbox. With the cutoffs defaulting to `None` the graph behaviour is unchanged
+  from `master`, but this should be confirmed on real grids.
+- **Release + bump.** Publishing a new `expertop4grid` and bumping the pin in
+  `Expert_op4grid_recommender` is what actually delivers these changes downstream;
+  the recommender may then optionally drop its antenna-mode `get_dispatch_edges_nodes`
+  workaround.
