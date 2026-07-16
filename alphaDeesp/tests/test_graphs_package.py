@@ -367,6 +367,21 @@ class TestStructuredOverloadDistributionGraph:
         sg = Structured_Overload_Distribution_Graph(_make_structured_overload_input())
         assert sg.get_loops() is sg.red_loops
 
+    def test_lazy_views_are_frozen_to_construction_snapshot(self):
+        """The lazy views must reflect the graph *as it was at construction*,
+        even if the caller mutates the shared graph before the views are first
+        accessed (consolidate_graph removes ignored lines from the same graph
+        this object was built on). Matches the OLD eager construction-time copy.
+        """
+        g = _make_structured_overload_input()
+        sg = Structured_Overload_Distribution_Graph(g)
+        # Mutate the caller's graph AFTER construction, BEFORE any view access.
+        g.remove_edge("A", "X")  # drop a coral loop edge (line_AX)
+        # Views/loops must still see the construction-time coral loop A->X->D.
+        assert "X" in set(sg.g_only_red_components.nodes)
+        loops = [list(p) for p in sg.get_loops()["Path"].tolist()]
+        assert ["A", "X", "D"] in loops
+
 
 def _make_loopless_overload_input():
     """Constrained path with NO coral loop path -> ``red_loops`` is empty.

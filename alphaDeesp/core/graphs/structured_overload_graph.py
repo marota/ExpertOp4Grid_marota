@@ -61,6 +61,18 @@ class Structured_Overload_Distribution_Graph:
         """
         self.g_init = g
         self.loop_path_cutoff = loop_path_cutoff
+        # Snapshot the graph at construction. The colour-filtered views are lazy
+        # (below) but MUST reflect the graph *as it was when this object was
+        # built* — the historical eager ``__init__`` copied every view at
+        # construction, so a later mutation of the caller's graph (e.g.
+        # ``consolidate_graph`` removing the ignored lines from the shared
+        # ``OverFlowGraph.g`` before it re-reads this object) did not leak into
+        # the views. Deferring the copies to first access would read the mutated
+        # graph instead; freezing a single snapshot here preserves the exact
+        # snapshot semantics while keeping the views lazy. ``g_init`` itself stays
+        # a live reference — ``get_constrained_edges_nodes`` reads names off it and
+        # historically saw the live graph, so that alias is deliberately kept.
+        self._g_snapshot = g.copy()
         # Caller-supplied hub seeds influence *loop enumeration* only (see the
         # ``red_loops`` property); the *detected* hubs are exposed via ``hubs`` /
         # ``get_hubs``. Historically this seed was stored in ``self.hubs`` until
@@ -79,14 +91,15 @@ class Structured_Overload_Distribution_Graph:
         self.constrained_path = self.find_constrained_path()
 
     # ------------------------------------------------------------------
-    # Lazy colour-filtered views (pure functions of ``g_init``; cached).
-    # Each removes the *union* of the listed colours in a single graph copy.
+    # Lazy colour-filtered views (pure functions of the construction-time
+    # snapshot; cached). Each removes the *union* of the listed colours in a
+    # single graph copy.
     # ------------------------------------------------------------------
 
     @cached_property
     def g_without_pos_edges(self) -> nx.MultiDiGraph:
         """Overflow graph without coral (positive / loop) edges."""
-        return delete_color_edges(self.g_init, "coral")
+        return delete_color_edges(self._g_snapshot, "coral")
 
     @cached_property
     def g_only_blue_components(self) -> nx.MultiDiGraph:
@@ -95,22 +108,22 @@ class Structured_Overload_Distribution_Graph:
         ``dimgray`` (non-reconnectable null-flow lines that we still visualise)
         is removed too: they are not an operational path in the structured path.
         """
-        return delete_color_edges(self.g_init, ("coral", "gray", "dimgray"))
+        return delete_color_edges(self._g_snapshot, ("coral", "gray", "dimgray"))
 
     @cached_property
     def g_without_constrained_edge(self) -> nx.MultiDiGraph:
         """Overflow graph without the black (overloaded) edges."""
-        return delete_color_edges(self.g_init, "black")
+        return delete_color_edges(self._g_snapshot, "black")
 
     @cached_property
     def g_without_gray_and_c_edge(self) -> nx.MultiDiGraph:
         """Only the coloured redispatch edges (drops black / gray / dimgray)."""
-        return delete_color_edges(self.g_init, ("black", "gray", "dimgray"))
+        return delete_color_edges(self._g_snapshot, ("black", "gray", "dimgray"))
 
     @cached_property
     def g_only_red_components(self) -> nx.MultiDiGraph:
         """Only the coral (positive / loop) redispatch edges."""
-        return delete_color_edges(self.g_init, ("black", "gray", "dimgray", "blue"))
+        return delete_color_edges(self._g_snapshot, ("black", "gray", "dimgray", "blue"))
 
     @cached_property
     def red_loops(self) -> pd.DataFrame:
