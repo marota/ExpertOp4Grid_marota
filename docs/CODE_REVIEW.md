@@ -241,22 +241,25 @@ since the underlying raise is fixed, but this is not required.
 
 ---
 
+## Round 2 — deep revisions & open findings implemented
+
+A second implementation pass cleared the three named deep revisions, the three
+open findings (#4/#6/#7), and the interactive-viewer decomposition:
+
+| Item | Change | Tests |
+|---|---|---|
+| Deep — finish model/colour inversion | new `graphs/edge_roles.py` (`edge_role_of` / `base_color_of` / `EDGE_ROLE_*`); `tag_constrained_path` reads the role, not the colour string; `highlight_*` records an authoritative `base_color`; new `OverFlowGraph.edge_role(name)` | `test_edge_roles.py`, `test_overflow_graph.py` |
+| Deep — `AlphaDeesp` explicit `run()` | pipeline moved to `run()`; `auto_run=True` default keeps backwards-compat; results initialised empty | `test_alphadeesp_unit.py::TestAutoRunSeparation` |
+| Deep — structured graph laziness | colour views / `red_loops` / `hubs` are `cached_property`; `red_loops` uses seed hubs, `find_loops()` uses detected hubs (order-independent, behaviour-identical) | `test_graphs_package.py` (caching + order-independence) |
+| #4 — `create_df` | vectorised the `iterrows` passes; positional `.iloc[line_to_cut[0]]` | `test_simulation_create_df.py` (400-case differential fuzz vs the original loop) |
+| #6 — `shortest_paths.py` | shared `_make_incentivized_weight`; dead branch removed; **multigraph-correct** min-parallel-weight + `(u,v)`/`(u,v,key)` promoted matching | `test_shortest_paths.py::TestMultiDiGraphWeighting` |
+| #7 — `to_DiGraph` | missing `capacity` defaults to `0.0` (neutral in the min-cut) not `1.0` | `test_alphadeesp_unit.py::TestToDiGraph` |
+| Maint — interactive viewer | `interactive_html.py` (976 LOC) → package `interactive_html/` (8 focused modules, largest 191 LOC) + externalised `assets/{viewer.css,viewer.js,template.html}` reassembled byte-exactly at runtime; shipped via `package_data`/`MANIFEST` | `test_interactive_html.py` (+ asset tests) |
+
 ## Pistes de travail restantes (remaining work)
 
-Consolidated backlog of what this pass did **not** address, ranked roughly by
-leverage. Nothing below is required for the shipped changes to be correct — they
-are the next increments.
-
-### Correctness follow-ups (open findings)
-- **#4 — `create_df` positional indexing** (`core/simulation.py`). `df["delta_flows"].abs()[line_to_cut[0]]`
-  indexes a Series *by label* assuming a contiguous `RangeIndex` aligned to line
-  ids; key on the line id explicitly. Also several `iterrows` passes to vectorise.
-  *Needs grid2op to exercise.*
-- **#6 — `shortest_paths.py`** dead `elif G.is_multigraph(): pass` branch and
-  incomplete MultiDiGraph promoted-edge matching (the "prefer promoted edges"
-  heuristic silently degrades on multigraphs).
-- **#7 — `to_DiGraph`** defaults a missing `capacity` to `1.0`, skewing
-  `rank_red_loops`; prefer `0.0` or assert presence.
+Ranked roughly by leverage. Nothing below is required for the shipped changes to
+be correct.
 
 ### Maintainability (highest leverage first)
 - **Repoint CI static analysis at the `graphs/` package** (review rec. #2, skipped
@@ -266,21 +269,19 @@ are the next increments.
 - **Mixins → composition or `typing.Protocol`.** `NullFlowGraphMixin`,
   `GraphConsolidationMixin`, `TopologyScorerMixin`, `TopoApplicatorMixin` assume
   `self.g` / `self.float_precision` with no enforced contract.
-- **`interactive_html.py` (~976 LOC)** — decompose like the graph layer; externalise
-  the embedded JS/CSS to lintable asset files. It is part of the cross-repo surface.
 - **`Grid2opSimulation.py` (~814 LOC)** monolith — split by concern.
 - **Logging vs `print`** — route the ~40 remaining `print()` calls in the older
   backends (`grid2op/`, `pypownet/`, `network.py`, `printer.py`) through `logging`.
+- **`null_flow_graph._compute_sssp_paths`** shares the multigraph weight subtlety
+  that #6 fixed in `shortest_paths` (its `attr.get("capacity")` reads `0` for every
+  parallel-edge view); left as-is because null-flow edges are ~0 capacity anyway and
+  the path is only exercisable with grid2op — worth revisiting with that backend.
 
 ### Deeper revisions
-- **Finish inverting model vs colour strings.** `tag_constrained_path` still
-  parses `"coral:yellow:coral"`; make the semantic model authoritative and derive
-  all colours from it (never the reverse). Consider an `edge_role(name)` accessor
-  so no downstream repo ever parses a colour again.
-- **`AlphaDeesp.__init__` side effects → explicit `run()`.** Ranking runs in the
-  constructor; `AlphaDeesp_warmStart` exists only to skip it.
-- **`Structured_Overload_Distribution_Graph`** eager construction + the consolidation
-  loop rebuilding the whole object each iteration — cache colour-subgraph views.
+- **`Structured_Overload_Distribution_Graph`** consolidation loop still rebuilds the
+  whole object each iteration (inherent to the algorithm; the views are now lazy so
+  each rebuild computes only what it touches). An incremental-update redesign is the
+  next step if consolidation becomes a hotspot.
 
 ### Interface / naming (backward-compatible only)
 - PEP8 forwarding aliases + a deprecation clock for the `camelCase`

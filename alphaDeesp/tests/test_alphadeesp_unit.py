@@ -485,6 +485,41 @@ class TestBuildInflowLookup:
         assert lookup[(3, 5)] == AlphaDeesp._initial_inflow_between(df, 3, 5)
 
 
+class TestAutoRunSeparation:
+    """``auto_run=False`` builds the object without running the ranking
+    pipeline; ``run()`` populates the results. A trivial graph (no black
+    constrained edge) would make the pipeline raise, which lets us prove the
+    constructor did NOT run it."""
+
+    @staticmethod
+    def _trivial():
+        import pandas as pd
+        g = nx.MultiDiGraph()
+        g.add_edge(0, 1, color="gray", capacity=0.0, name="l0")
+        df = pd.DataFrame({"idx_or": [0], "idx_ex": [1], "init_flows": [0.0]})
+        return g, df
+
+    def test_no_pipeline_when_auto_run_false(self):
+        g, df = self._trivial()
+        # Would raise inside the pipeline (no constrained edge); must NOT raise.
+        ad = AlphaDeesp(g, df, simulator_data={"substations_elements": {}},
+                        auto_run=False)
+        assert ad.g_distribution_graph is None
+        assert ad.get_ranked_combinations() == []
+        assert ad.rankedLoopBuses == {}
+        # state that the constructor still sets
+        assert ad.initial_graph.number_of_edges() == 1
+
+    def test_run_is_invoked_by_default(self):
+        # A real pipeline needs a valid overflow graph; here we only assert that
+        # auto_run defaults to True by observing the pipeline is attempted
+        # (raises on the trivial graph) — i.e. the default path calls run().
+        g, df = self._trivial()
+        import pytest
+        with pytest.raises(Exception):
+            AlphaDeesp(g, df, simulator_data={"substations_elements": {}})
+
+
 class _SortHubsHost:
     """Expose the vectorised ``sort_hubs`` on a bare object."""
     sort_hubs = AlphaDeesp.sort_hubs
@@ -609,11 +644,20 @@ class TestToDiGraph:
         assert isinstance(result, nx.DiGraph)
         assert result["A"]["B"]["capacity"] == 5.0
 
-    def test_defaults_missing_capacity_to_one(self):
+    def test_defaults_missing_capacity_to_zero(self):
+        # A genuinely missing capacity must contribute 0 to the min-cut used by
+        # rank_red_loops, not a spurious unit weight.
         g = nx.MultiDiGraph()
         g.add_edge("A", "B")  # no capacity
         result = self._call(g)
-        assert result["A"]["B"]["capacity"] == 1.0
+        assert result["A"]["B"]["capacity"] == 0.0
+
+    def test_missing_and_present_capacity_sum(self):
+        g = nx.MultiDiGraph()
+        g.add_edge("A", "B", capacity=4.0)
+        g.add_edge("A", "B")  # missing -> contributes 0
+        result = self._call(g)
+        assert result["A"]["B"]["capacity"] == 4.0
 
     def test_preserves_distinct_edges(self):
         g = nx.MultiDiGraph()

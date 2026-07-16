@@ -33,6 +33,7 @@ from alphaDeesp.core.graphs.null_flow_graph import NullFlowGraphMixin
 from alphaDeesp.core.graphs.graph_consolidation import GraphConsolidationMixin
 from alphaDeesp.core.graphs.graph_utils import delete_color_edges
 from alphaDeesp.core.graphs.overflow_renderer import OverflowGraphRenderer
+from alphaDeesp.core.graphs.edge_roles import EDGE_ROLE_POSITIVE, edge_role_of
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,7 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
 
         is_overload_attrs: Dict[Any, bool] = {}
         is_monitored_attrs: Dict[Any, bool] = {}
+        base_color_attrs: Dict[Any, Any] = {}
 
         for edge, edge_name in edge_names.items():
             if edge_name not in dict_line_loading:
@@ -257,6 +259,11 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
                 else:
                     edge_x_labels[edge] = OverflowGraphRenderer.low_margin_label(
                         current_x_label, before, after)
+                # Wrapping the base colour into a compound "c:yellow:c" string is
+                # a *rendering* step; record the untouched base colour so the
+                # model stays authoritative and ``edge_role_of`` never has to
+                # parse the compound (see :mod:`alphaDeesp.core.graphs.edge_roles`).
+                base_color_attrs[edge] = current_edge_color
                 edge_colors[edge] = OverflowGraphRenderer.highlight_color(current_edge_color)
             else:
                 # Extras keep their natural flow colour; only the
@@ -270,6 +277,8 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         nx.set_edge_attributes(self.g, edge_x_labels, "label")
         nx.set_edge_attributes(self.g, label_font_color, "fontcolor")
         nx.set_edge_attributes(self.g, edge_colors, "color")
+        if base_color_attrs:
+            nx.set_edge_attributes(self.g, base_color_attrs, "base_color")
         if is_overload_attrs:
             nx.set_edge_attributes(self.g, is_overload_attrs, "is_overload")
         if is_monitored_attrs:
@@ -295,6 +304,24 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
             save_folder=save_folder,
             without_gray_edges=without_gray_edges,
         )
+
+    def edge_role(self, name: Any) -> Optional[str]:
+        """Return the semantic role of the first edge carrying line ``name``.
+
+        Reads the authoritative base colour (see
+        :func:`~alphaDeesp.core.graphs.edge_roles.edge_role_of`) so callers
+        never parse the rendered — possibly compound ``"c:yellow:c"`` — ``color``
+        string. Returns one of the ``EDGE_ROLE_*`` constants, or ``None`` when no
+        edge carries that name.
+
+        A physical line may appear as two directed edges (e.g. a ``blue`` and a
+        ``coral`` direction); this returns the first match. When the direction
+        matters, iterate edges and call ``edge_role_of`` per edge instead.
+        """
+        for _, _, data in self.g.edges(data=True):
+            if data.get("name") == name:
+                return edge_role_of(data)
+        return None
 
     def rename_nodes(self, mapping: Dict[Any, Any]) -> None:
         self.g = nx.relabel_nodes(self.g, mapping, copy=True)
@@ -372,22 +399,20 @@ class OverFlowGraph(NullFlowGraphMixin, GraphConsolidationMixin, PowerFlowGraph)
         is on the constrained path; including the coral counterpart
         would surface positive-overflow edges in the layer toggle and
         confuse the operator.
+
+        The coral test reads the edge's semantic *role* via
+        :func:`~alphaDeesp.core.graphs.edge_roles.edge_role_of` (which prefers
+        the authoritative ``base_color`` and is compound-colour safe) rather
+        than parsing the rendered ``color`` string here.
         """
         if lines_constrained_path:
             wanted = set(lines_constrained_path)
             edge_names = nx.get_edge_attributes(self.g, "name")
-            edge_colors = nx.get_edge_attributes(self.g, "color")
             edge_attrs: Dict[Any, bool] = {}
             for edge, name in edge_names.items():
                 if name not in wanted:
                     continue
-                color = edge_colors.get(edge, "")
-                base_color = (
-                    color.split(":", 1)[0].strip().strip('"').lower()
-                    if isinstance(color, str)
-                    else ""
-                )
-                if base_color == "coral":
+                if edge_role_of(self.g.edges[edge]) == EDGE_ROLE_POSITIVE:
                     continue
                 edge_attrs[edge] = True
             if edge_attrs:

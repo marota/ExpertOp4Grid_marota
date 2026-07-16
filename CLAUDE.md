@@ -39,8 +39,11 @@ alphaDeesp/
 │   │   ├── graph_consolidation.py  # GraphConsolidationMixin (disambiguation)
 │   │   ├── graph_utils.py          # pure networkx helpers (delete_color_edges, ...)
 │   │   ├── shortest_paths.py       # mandatory/promoted-edge shortest paths
+│   │   ├── edge_roles.py           # base-colour → semantic role accessor (edge_role_of)
 │   │   └── constants.py            # default_voltage_colors, ...
-│   ├── interactive_html.py         # Interactive HTML/SVG overflow viewer (used by other repos)
+│   ├── interactive_html/           # Interactive HTML/SVG overflow viewer (used by other repos)
+│   │   ├── {helpers,constants,layers,model,svg,template,render}.py
+│   │   └── assets/{viewer.css,viewer.js,template.html}  # externalised JS/CSS/skeleton
 │   ├── simulation.py               # Abstract Simulation base class + DataFrame plumbing
 │   ├── network.py                  # Network / Substation model objects
 │   ├── elements.py                 # Production, Consumption, OriginLine, ExtremityLine classes
@@ -107,6 +110,31 @@ OverFlowGraph, ...`; new code should import from `alphaDeesp.core.graphs`.
 The public surface of the package is pinned by `tests/test_graphs_package.py`
 (`EXPECTED_PUBLIC_NAMES` / `EXPECTED_SUBMODULES`) — update those sets when you
 add or move a public symbol.
+
+**Semantic edge roles.** `graphs/edge_roles.py::edge_role_of(edge_data)` is the
+single authority mapping an edge's base colour to a stable role
+(`EDGE_ROLE_OVERLOAD/NEGATIVE/POSITIVE/INSIGNIFICANT/NULL_NON_RECONNECTABLE`).
+It prefers the `base_color` attribute (recorded by the renderer when it wraps a
+colour into a compound `"c:yellow:c"` highlight) and is compound-safe — so no
+consumer should ever parse a Graphviz colour string. `OverFlowGraph.edge_role(name)`
+is the convenience by-line-name accessor.
+
+**Lazy structured graph.** `Structured_Overload_Distribution_Graph` computes its
+colour-filtered views, `red_loops` and `hubs` as `functools.cached_property`
+(constrained path stays eager). `red_loops` uses the constructor *seed* hubs;
+the public `find_loops()` re-enumerates with the *detected* hubs (this split is
+what makes the lazy properties order-independent while matching the old eager
+behaviour). Don't reintroduce eager computation.
+
+**AlphaDeesp construction.** `AlphaDeesp(..., auto_run=True)` runs the ranking
+pipeline in the constructor (default, backwards-compatible). Pass
+`auto_run=False` and call `.run()` for staged/testable execution.
+`AlphaDeesp_warmStart` is the pre-existing "skip the pipeline" path.
+
+**Interactive viewer.** `core/interactive_html/` is a package; the CSS/JS/HTML
+skeleton are externalised under `assets/` and reassembled at runtime by
+`template.html_template()`. Edit the `.css`/`.js` assets directly. The package
+is shipped via `package_data` in `setup.py` + `MANIFEST.in`.
 
 ## Common Commands
 

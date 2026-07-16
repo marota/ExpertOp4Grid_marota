@@ -34,7 +34,17 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         simulator_data: Optional[Dict[str, Any]] = None,
         substation_in_cooldown: Optional[List[int]] = None,
         debug: bool = False,
+        auto_run: bool = True,
     ) -> None:
+        """Build the solver state and (by default) run the ranking pipeline.
+
+        :param auto_run: when ``True`` (default, backwards-compatible) the full
+            ranking pipeline runs in the constructor. Pass ``False`` to build the
+            object without side effects and call :meth:`run` explicitly — useful
+            for testing, staged execution, or introspecting intermediate state.
+            :class:`AlphaDeesp_warmStart` is the pre-existing "skip the pipeline"
+            path and is now expressible as ``auto_run=False``.
+        """
         self.bag_of_graphs: Dict[str, Any] = {}
         self.debug = debug
         self.boolean_dump_data_to_file = False
@@ -47,6 +57,24 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         self.initial_graph = self.g.copy()
         self.substation_in_cooldown = substation_in_cooldown if substation_in_cooldown is not None else []
 
+        # Pipeline results — populated by run(); initialised empty so the object
+        # is well-formed (no AttributeError) even when auto_run is False.
+        self.g_distribution_graph: Any = None
+        self.rankedLoopBuses: Dict[Any, float] = {}
+        self.structured_topological_actions: Dict[int, Any] = {}
+        self.ranked_combinations: List[pd.DataFrame] = []
+
+        if auto_run:
+            self.run()
+
+    def run(self) -> "AlphaDeesp":
+        """Execute the full ranking pipeline and cache the results on ``self``.
+
+        Idempotent-by-recompute: builds the structured distribution graph, ranks
+        red loops and loop buses, identifies routing buses and scores the
+        candidate topologies. Returns ``self`` so callers can chain
+        ``AlphaDeesp(..., auto_run=False).run().get_ranked_combinations()``.
+        """
         self.g_distribution_graph = Structured_Overload_Distribution_Graph(self.g)
 
         self.rank_red_loops()
@@ -57,6 +85,8 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
 
         if self.boolean_dump_data_to_file:
             self.ranked_combinations[0].to_csv("./result_ranked_combinations.csv", index=True)
+
+        return self
 
     def get_ranked_combinations(self) -> List[pd.DataFrame]:
         return self.ranked_combinations
@@ -322,10 +352,15 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
         red_loops["min_cut_edges"] = cut_sets
 
     def to_DiGraph(self, gM: nx.MultiDiGraph) -> nx.DiGraph:
-        """Flatten a MultiDiGraph to a DiGraph by summing parallel edge capacities."""
+        """Flatten a MultiDiGraph to a DiGraph by summing parallel edge capacities.
+
+        A genuinely missing ``capacity`` contributes ``0.0`` (a neutral edge in
+        the min-cut used by :meth:`rank_red_loops`), not a spurious unit weight
+        that would skew the cut.
+        """
         G = nx.DiGraph()
         for u, v, _, data in gM.edges(data=True, keys=True):
-            w = data.get("capacity", 1.0)
+            w = data.get("capacity", 0.0)
             if G.has_edge(u, v):
                 G[u][v]["capacity"] += w
             else:
@@ -348,7 +383,13 @@ class AlphaDeesp(TopologyScorerMixin, TopoApplicatorMixin):
 
 
 class AlphaDeesp_warmStart(AlphaDeesp):
-    """Skip the expensive pipeline; caller supplies a pre-built distribution graph."""
+    """Skip the expensive pipeline; caller supplies a pre-built distribution graph.
+
+    Equivalent in spirit to ``AlphaDeesp(..., auto_run=False)`` with the
+    distribution graph injected, but kept as a distinct class (external code —
+    e.g. the recommender — imports it directly) and deliberately avoids the base
+    constructor's ``initial_graph = g.copy()`` so warm starts stay cheap.
+    """
 
     def __init__(
         self,
@@ -363,3 +404,8 @@ class AlphaDeesp_warmStart(AlphaDeesp):
         self.g = g
         self.g_distribution_graph = g_distribution_graph
         self.simulator_data = simulator_data
+        # Well-formedness: the pipeline hasn't run, but the result attributes
+        # exist (empty) so accessing them never raises AttributeError.
+        self.rankedLoopBuses: Dict[Any, float] = {}
+        self.structured_topological_actions: Dict[int, Any] = {}
+        self.ranked_combinations: List[pd.DataFrame] = []

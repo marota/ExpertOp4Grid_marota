@@ -997,3 +997,61 @@ class TestDoesNotMutateCallerDataFrame:
         ofg.rename_nodes({0: "A", 1: "B", 2: "C"})
         assert list(df["idx_or"]) == [0, 1]
         assert list(df["idx_ex"]) == [1, 2]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# edge_role accessor + base_color authority (model/colour inversion).
+# ──────────────────────────────────────────────────────────────────────
+
+from alphaDeesp.core.graphs.edge_roles import (  # noqa: E402
+    EDGE_ROLE_OVERLOAD,
+    EDGE_ROLE_POSITIVE,
+)
+
+
+class TestEdgeRoleAccessor:
+
+    def test_edge_role_by_name(self):
+        df = pd.DataFrame({
+            "idx_or": [0, 1, 2],
+            "idx_ex": [1, 2, 0],
+            "delta_flows": [1000.0, -100.0, 50.0],
+            "gray_edges": [False, False, False],
+            "line_name": ["L1", "L2", "L3"],
+        })
+        ofg = OverFlowGraph(_basic_topo(3), [0], df)  # L1 cut -> overload (black)
+        assert ofg.edge_role("L1") == EDGE_ROLE_OVERLOAD
+        assert ofg.edge_role("L2") == "negative"   # delta -100 -> blue
+        assert ofg.edge_role("L3") == EDGE_ROLE_POSITIVE  # delta +50 -> coral
+        assert ofg.edge_role("nope") is None
+
+
+class TestHighlightRecordsBaseColor:
+    """After highlight compounds the rendered colour, the authoritative base
+    colour is recorded so ``edge_role`` / ``tag_constrained_path`` never parse
+    the ``"c:yellow:c"`` string."""
+
+    def test_base_color_recorded_and_role_stable_after_highlight(self):
+        df = _three_line_df()  # L1 +overload, L2 -, L3 +
+        ofg = OverFlowGraph(_basic_topo(3), [0], df)
+        ofg.highlight_significant_line_loading({
+            "L1": {"before": 110, "after": 80},
+            "L3": {"before": 75, "after": 60},
+        })
+        (_, l1) = _edge_by_name(ofg.g, "L1")
+        (_, l3) = _edge_by_name(ofg.g, "L3")
+        # rendered colour is compound, but base_color + edge_role stay clean
+        assert l1["color"] == '"black:yellow:black"'
+        assert l1["base_color"] == "black"
+        assert ofg.edge_role("L1") == EDGE_ROLE_OVERLOAD
+        assert l3["base_color"] == "coral"
+        assert ofg.edge_role("L3") == EDGE_ROLE_POSITIVE
+
+    def test_tag_constrained_path_skips_compound_coral_via_base_color(self):
+        df = _three_line_df()
+        ofg = OverFlowGraph(_basic_topo(3), [0], df)
+        ofg.highlight_significant_line_loading({"L3": {"before": 75, "after": 60}})
+        # L3 is coral (compound after highlight); constrained-path tagging must skip it
+        ofg.tag_constrained_path(lines_constrained_path=["L3"])
+        (_, l3) = _edge_by_name(ofg.g, "L3")
+        assert l3.get("on_constrained_path") is None

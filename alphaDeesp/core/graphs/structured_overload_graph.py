@@ -3,6 +3,7 @@ loop paths and hubs from a raw overflow graph.
 """
 
 import logging
+from functools import cached_property
 from typing import Any, List, Optional, Tuple
 
 import networkx as nx
@@ -58,28 +59,74 @@ class Structured_Overload_Distribution_Graph:
             small a value silently drops legitimate long loops.
 
         """
-        self.g_init=g
+        self.g_init = g
         self.loop_path_cutoff = loop_path_cutoff
-        # Derive each colour-filtered view in a *single* copy (see
-        # ``delete_color_edges``): removing the union of colours at once is
-        # equivalent to chaining the removals but avoids the intermediate
-        # full-graph copies the chained form used to allocate.
-        self.g_without_pos_edges = delete_color_edges(self.g_init, "coral") #graph without loop path that have positive/red-coloured weight edges
-        #also delete dimgray edges of non reconnectable lines that we would want to visualize but is not an operational path in the structured path
-        self.g_only_blue_components = delete_color_edges(self.g_init, ("coral", "gray", "dimgray"))
+        # Caller-supplied hub seeds influence *loop enumeration* only (see the
+        # ``red_loops`` property); the *detected* hubs are exposed via ``hubs`` /
+        # ``get_hubs``. Historically this seed was stored in ``self.hubs`` until
+        # ``find_hubs`` overwrote it — capturing it separately makes the lazy
+        # properties order-independent while preserving that exact behaviour.
+        self._possible_hubs = list(possible_hubs) if possible_hubs is not None else []
+        self.type = ""
 
-        self.g_without_constrained_edge = delete_color_edges(self.g_init, "black")
-        self.g_without_gray_and_c_edge = delete_color_edges(self.g_init, ("black", "gray", "dimgray"))
-        self.g_only_red_components = delete_color_edges(self.g_init, ("black", "gray", "dimgray", "blue"))#graph with only loop path that have positive/red-coloured weight edges
+        # The colour-filtered views, red loops and hubs are lazy *cached
+        # properties* (computed once on first access, then memoised): a consumer
+        # that needs only a subset — or that never consolidates — does not pay
+        # for the rest, and the consolidation loop's repeated rebuilds compute
+        # only what each iteration touches. The constrained path is validated
+        # eagerly: it is cheap and preserves the construction-time "is this a
+        # valid overflow graph" check that callers relied on.
+        self.constrained_path = self.find_constrained_path()
 
-        self.constrained_path= self.find_constrained_path() #constrained path that contains the constrained edges and their connected component of blue edges
-        self.type=""#
-        if possible_hubs is not None:#in case we already have a subset of candidates, for instance when we already built a first Overload graph and are consolidating it
-            self.hubs=possible_hubs
-        else:
-            self.hubs=[]
-        self.red_loops = self.find_loops() #parallel path to the constrained path on which flow can be rerouted
-        self.hubs = self.find_hubs() #specific nodes at substations connecting loop paths to constrained path. This is where flow can be most easily rerouted
+    # ------------------------------------------------------------------
+    # Lazy colour-filtered views (pure functions of ``g_init``; cached).
+    # Each removes the *union* of the listed colours in a single graph copy.
+    # ------------------------------------------------------------------
+
+    @cached_property
+    def g_without_pos_edges(self) -> nx.MultiDiGraph:
+        """Overflow graph without coral (positive / loop) edges."""
+        return delete_color_edges(self.g_init, "coral")
+
+    @cached_property
+    def g_only_blue_components(self) -> nx.MultiDiGraph:
+        """Only the blue constrained-path components (drops coral / gray / dimgray).
+
+        ``dimgray`` (non-reconnectable null-flow lines that we still visualise)
+        is removed too: they are not an operational path in the structured path.
+        """
+        return delete_color_edges(self.g_init, ("coral", "gray", "dimgray"))
+
+    @cached_property
+    def g_without_constrained_edge(self) -> nx.MultiDiGraph:
+        """Overflow graph without the black (overloaded) edges."""
+        return delete_color_edges(self.g_init, "black")
+
+    @cached_property
+    def g_without_gray_and_c_edge(self) -> nx.MultiDiGraph:
+        """Only the coloured redispatch edges (drops black / gray / dimgray)."""
+        return delete_color_edges(self.g_init, ("black", "gray", "dimgray"))
+
+    @cached_property
+    def g_only_red_components(self) -> nx.MultiDiGraph:
+        """Only the coral (positive / loop) redispatch edges."""
+        return delete_color_edges(self.g_init, ("black", "gray", "dimgray", "blue"))
+
+    @cached_property
+    def red_loops(self) -> pd.DataFrame:
+        """Parallel (loop) paths, enumerated with the caller-supplied seed hubs.
+
+        Mirrors the historical eager ``self.red_loops = find_loops()`` which ran
+        *before* hub detection — so it uses ``_possible_hubs`` (the seed), not the
+        detected ``hubs``. The public :meth:`find_loops` re-enumerates with the
+        detected hubs when called after construction (as consolidation does).
+        """
+        return self._find_loops(self._possible_hubs)
+
+    @cached_property
+    def hubs(self) -> List[Any]:
+        """Detected hub nodes (memoised)."""
+        return self.find_hubs()
 
     def get_amont_blue_edges(self, g: nx.MultiDiGraph, node: Any) -> List[Any]:
         """
@@ -149,11 +196,9 @@ class Structured_Overload_Distribution_Graph:
         g = self.g_without_constrained_edge
         hubs = []
 
-        if self.constrained_path is not None:
-            logger.debug("In get_hubs(): constrained_path = %s", self.constrained_path)
-        else:
-            e_amont, constrained_edge, e_aval = self.get_constrained_path()
-            self.constrained_path = ConstrainedPath(e_amont, constrained_edge, e_aval)
+        # ``constrained_path`` is validated eagerly in ``__init__``, so it is
+        # always available here.
+        logger.debug("In find_hubs(): constrained_path = %s", self.constrained_path)
 
         # for nodes in aval, if node has RED inputs (ie incoming flows) then it is a hub
         for node in self.constrained_path.n_aval():
@@ -178,6 +223,15 @@ class Structured_Overload_Distribution_Graph:
         return self.hubs
 
     def find_loops(self) -> pd.DataFrame:
+        """Enumerate loop paths using the *currently detected* hubs (``self.hubs``).
+
+        The cached :attr:`red_loops` uses the caller-supplied seed hubs instead
+        (see its docstring); consolidation re-enumerates through this method
+        after the hubs have been detected.
+        """
+        return self._find_loops(self.hubs)
+
+    def _find_loops(self, hubs: List[Any]) -> pd.DataFrame:
 
         """This function returns all parallel paths. After discussing with Antoine, start with the most "en Aval" node,
         and walk in reverse for loops and parallel path returns a dict with all data
@@ -197,8 +251,8 @@ class Structured_Overload_Distribution_Graph:
         # print("==================== In function get_loops ====================")
         g = self.g_only_red_components
         c_path_n = self.constrained_path.full_n_constrained_path()
-        if len(self.hubs)!=0:#already some insights of possible hubs
-            c_path_n=self.hubs
+        if len(hubs)!=0:#already some insights of possible hubs
+            c_path_n=hubs
 
         # --- 1. PRE-PROCESSING (Rustworkx) ---
         # Convert NetworkX graph to Rustworkx for 50x speedup

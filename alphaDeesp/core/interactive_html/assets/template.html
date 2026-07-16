@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>__TITLE__</title>
+<style>__CSS__</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>__TITLE__</h1>
+    <div class="hint">Click a node to highlight its neighbourhood. Wheel to zoom, drag to pan. Esc clears selection.</div>
+
+    <h2>Search</h2>
+    <input type="text" id="search" placeholder="filter nodes by name or id…" autocomplete="off">
+
+    <h2>Layers</h2>
+    <div class="layer-controls">
+      <button id="layers-select-all" type="button" title="Show every layer">Select all</button>
+      <span style="color: var(--muted)">·</span>
+      <button id="layers-select-none" type="button" title="Dim every layer">Unselect all</button>
+    </div>
+    <div id="layers"></div>
+
+    <h2>Selection</h2>
+    <div id="info">Nothing selected.</div>
+
+    <h2>Stats</h2>
+    <div class="hint" id="stats"></div>
+  </aside>
+  <section id="stage">
+    <div class="toolbar">
+      <button id="zoom-in" title="Zoom in">+</button>
+      <button id="zoom-out" title="Zoom out">−</button>
+      <button id="zoom-reset" title="Reset view">⟲</button>
+    </div>
+    __SVG__
+    <div id="tooltip"></div>
+  </section>
+</div>
+<script>__JS__</script>
+</body>
+</html>

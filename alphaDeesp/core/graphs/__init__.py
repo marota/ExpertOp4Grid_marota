@@ -6,6 +6,16 @@ used to expose. Existing import paths keep working through the shim in
 """
 
 from alphaDeesp.core.graphs.constants import default_voltage_colors
+from alphaDeesp.core.graphs.edge_roles import (
+    EDGE_ROLE_INSIGNIFICANT,
+    EDGE_ROLE_NEGATIVE,
+    EDGE_ROLE_NULL_NON_RECONNECTABLE,
+    EDGE_ROLE_OVERLOAD,
+    EDGE_ROLE_POSITIVE,
+    EDGE_ROLE_UNKNOWN,
+    base_color_of,
+    edge_role_of,
+)
 from alphaDeesp.core.graphs.graph_utils import (
     all_simple_edge_paths_multi,
     delete_color_edges,
@@ -38,6 +48,14 @@ __all__ = [
     "OverflowGraphRenderer",
     "ConstrainedPath",
     "Structured_Overload_Distribution_Graph",
+    "edge_role_of",
+    "base_color_of",
+    "EDGE_ROLE_OVERLOAD",
+    "EDGE_ROLE_NEGATIVE",
+    "EDGE_ROLE_POSITIVE",
+    "EDGE_ROLE_INSIGNIFICANT",
+    "EDGE_ROLE_NULL_NON_RECONNECTABLE",
+    "EDGE_ROLE_UNKNOWN",
     "from_edges_get_nodes",
     "delete_color_edges",
     "nodepath_to_edgepath",
