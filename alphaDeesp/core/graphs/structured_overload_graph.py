@@ -332,12 +332,11 @@ class Structured_Overload_Distribution_Graph:
         return self.red_loops
 
     def find_constrained_path(self) -> "ConstrainedPath":
-        """Find and return the constrained path
+        """Find and return the constrained path.
 
-         Returns
-        ----------
-
-        res: :class:`ConstrainedPath`
+        Returns
+        -------
+        ConstrainedPath
             a constrained path object
         """
         constrained_edge = None
@@ -354,16 +353,14 @@ class Structured_Overload_Distribution_Graph:
         return self.constrained_path
 
     def get_constrained_edges_nodes(self) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
-        """
-        This function identifies the constrained path within the distribution graph.
+        """Identify the constrained path within the distribution graph.
 
-        Parameters:
-        g_distribution_graph (Structured_Overload_Distribution_Graph): The structured overload distribution graph.
-
-        Returns:
-        tuple: A tuple containing two lists:
-               - edges_constrained_path: List of edges that are part of the constrained path.
-               - nodes_constrained_path: List of nodes that are part of the constrained path.
+        Returns
+        -------
+        tuple
+            ``(edges_constrained_path, nodes_constrained_path, other_blue_edges,
+            other_blue_nodes)`` — the line names and nodes on the constrained
+            path, plus the blue edges/nodes that are *not* on it.
         """
         constrained_path_object = self.constrained_path#self.find_constrained_path()
         nodes_constrained_path = constrained_path_object.full_n_constrained_path()
@@ -391,16 +388,19 @@ class Structured_Overload_Distribution_Graph:
         return list(set(edges_constrained_path)), nodes_constrained_path, other_blue_edges, other_blue_nodes
 
     def get_dispatch_edges_nodes(self, only_loop_paths: bool = True) -> Tuple[List[Any], List[Any]]:
-        """
-        This function identifies the dispatch path within the distribution graph.
+        """Identify the dispatch (loop) path within the distribution graph.
 
-        Parameters:
-        g_distribution_graph (Structured_Overload_Distribution_Graph): The structured overload distribution graph.
+        Parameters
+        ----------
+        only_loop_paths : bool
+            when True (default) restrict to nodes that lie on a detected red-loop
+            path; otherwise use every node of the red-component graph.
 
-        Returns:
-        tuple: A tuple containing two lists:
-               - lines_redispatch: List of lines that are part of the dispatch path.
-               - list_nodes_dispatch_path: List of nodes that are part of the dispatch path.
+        Returns
+        -------
+        tuple
+            ``(lines_redispatch, list_nodes_dispatch_path)`` — the line names and
+            nodes that make up the dispatch path.
         """
         lines_redispatch=[]
         list_nodes_dispatch_path=[]
