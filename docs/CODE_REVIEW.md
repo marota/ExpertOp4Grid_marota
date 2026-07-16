@@ -210,3 +210,31 @@ The grid2op integration suites (`alphadeesp_test.py`, `test_expert_op.py`,
 `lightsim2grid` and were **not** run in this environment. With the cutoffs now
 defaulting to `None`, the graph-analysis behaviour on those grids is unchanged
 from `master`; running them in CI remains the recommended confirmation.
+
+---
+
+## Downstream impact — `Expert_op4grid_recommender`
+
+The marota fork of `Expert_op4grid_recommender` (which depends on
+`expertop4grid`, pinned `==0.3.2.post3`) was audited against every change in
+this pass via a 5-lens cross-repo analysis, independently spot-checked.
+
+**Verdict: no breaking changes; one strictly-beneficial behavioural change.**
+
+| Vector | Result |
+|---|---|
+| `df.copy()` (QW4) | **Benign.** All three `OverFlowGraph(...)` sites set `df_of_g["line_name"]` themselves before construction (so the old injection guard never fired) and relabel `g_overflow.g` via `nx.relabel_nodes` directly — they never call `rename_nodes` and never read `g_overflow.df`. The old code therefore never mutated their frame either; the copy is unobservable. |
+| `rename_nodes` clarification | **None.** Not called by the recommender. |
+| Model/renderer split | **Benign.** `plot` / `set_hubs_shape` / `collapse_red_loops` / `highlight_significant_line_loading` / `highlight_swapped_flows` keep identical signatures and behaviour; the recommender does not import the moved private penwidth constants nor subclass `OverFlowGraph`. |
+| `delete_color_edges` multi-colour | **None.** Single-colour calls unchanged; the union form yields byte-identical derived graphs. |
+| `Structured_Overload_Distribution_Graph` 3rd param + single-pass views | **None.** `possible_hubs=` stays the 2nd param (the recommender's `try/except TypeError` fallback simply stops triggering); `find_loops` default `None` = original unbounded enumeration; derived colour graphs identical. |
+| `get_dispatch_edges_nodes` empty-loop guard | **Behavioural, beneficial.** `_orchestrator.py` calls `get_dispatch_edges_nodes(only_loop_paths=True)` unguarded in its non-antenna branch; on the old library that raises `TypeError` when a grid has no red loops. The guard now returns `([], [])`. The recommender already documents this exact hazard and works around it in antenna mode — it never relied on the crash. |
+| `consolidate_graph` / null-flow cutoffs | **None.** Default `None` (unbounded) preserves prior behaviour. |
+| `_compute_sssp_paths` `except` narrowing | **None.** `nx.NodeNotFound` ⊂ `nx.NetworkXException`; still caught. |
+| `AlphaDeesp_warmStart` | **None.** Signature and constructor body unchanged; the recommender instantiates it and never calls the (vectorised) ranking methods on it. |
+| Import surface | **None.** Every symbol the recommender imports (`OverFlowGraph`, `Structured_Overload_Distribution_Graph`, `AlphaDeesp_warmStart`, `Grid2opSimulation`) still resolves through the shim/package. |
+
+**Consumption path.** The recommender is unaffected until a new `expertop4grid`
+is released *and* its pin is bumped. When that happens it works unchanged; it
+may optionally drop the antenna-mode skip workaround in `_orchestrator.py`
+since the underlying raise is fixed, but this is not required.
